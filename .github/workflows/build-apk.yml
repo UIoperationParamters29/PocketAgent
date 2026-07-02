@@ -47,23 +47,29 @@ jobs:
           if [ -z "$SIGNING_KEYSTORE_BASE64" ]; then
             echo "No signing keystore secret — building unsigned debug APK."
           else
+            # The app/build.gradle signingConfig reads the keystore from
+            # android/app/release.keystore (relative to the app module dir).
+            mkdir -p android/app
             echo "$SIGNING_KEYSTORE_BASE64" | base64 -d > android/app/release.keystore
+            echo "Keystore written to android/app/release.keystore"
+            ls -la android/app/release.keystore
           fi
 
       - name: Build release APK
         env:
-          SIGNING_KEYSTORE: release.keystore
           SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
           SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
           SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
         run: |
           cd android
           if [ -f app/release.keystore ]; then
+            # Pass keystore location + passwords as gradle properties.
+            # The config plugin's signingConfigs.release block reads these.
             ./gradlew assembleRelease \
-              -Pandroid.injected.signing.store.file=app/release.keystore \
-              -Pandroid.injected.signing.store.password="$SIGNING_STORE_PASSWORD" \
-              -Pandroid.injected.signing.key.alias="$SIGNING_KEY_ALIAS" \
-              -Pandroid.injected.signing.key.password="$SIGNING_KEY_PASSWORD"
+              -PPA_RELEASE_STORE_FILE=app/release.keystore \
+              -PPA_RELEASE_STORE_PASSWORD="$SIGNING_STORE_PASSWORD" \
+              -PPA_RELEASE_KEY_ALIAS="$SIGNING_KEY_ALIAS" \
+              -PPA_RELEASE_KEY_PASSWORD="$SIGNING_KEY_PASSWORD"
           else
             ./gradlew assembleDebug
           fi
