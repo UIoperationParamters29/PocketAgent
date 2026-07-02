@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # PocketAgent codespace bootstrap — runs once on codespace creation.
 # Mirrors the z.ai agentic sandbox: Python 3.12, Node 24, ripgrep, common tools.
+# Also installs the runtime + starts it (so the public port-8000 URL works
+# immediately after codespace creation).
 set -euo pipefail
 
 echo "=== PocketAgent bootstrap ==="
@@ -20,6 +22,8 @@ sudo apt-get install -y -qq \
 cd /workspaces/PocketAgent/cloud/runtime
 python -m pip install --upgrade pip -q
 pip install -e . -q
+echo "Runtime installed."
+python -c "import app.main; print('runtime module loads OK')"
 
 # 3. Workspace dirs (mirror z.ai layout)
 mkdir -p ~/workspace/{download,scripts,upload,skills,.pocketagent}
@@ -40,14 +44,40 @@ EOF
   echo "Wrote default AGENTS.md to ~/workspace/AGENTS.md"
 fi
 
-# 5. Helpful message
-cat <<'EOF'
+# 5. Start the runtime in the background (so port 8000 is alive immediately)
+# If PA_CHANNEL_SECRET is set (via Codespaces secret), use it. Otherwise ephemeral.
+if [ -z "${PA_CHANNEL_SECRET:-}" ]; then
+  EPHEM=$(openssl rand -hex 16)
+  export PA_CHANNEL_SECRET="$EPHEM"
+  echo ""
+  echo "==============================================================="
+  echo "  PocketAgent runtime starting with EPHEMERAL channel secret:"
+  echo "    $EPHEM"
+  echo "  (For production, set PA_CHANNEL_SECRET as a Codespaces secret"
+  echo "   at github.com/settings/codespaces — scoped to this repo.)"
+  echo "==============================================================="
+fi
+
+# Kill any stale uvicorn, then start fresh
+pkill -f "uvicorn app.main:app" 2>/dev/null || true
+sleep 1
+cd /workspaces/PocketAgent/cloud/runtime
+nohup python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > /tmp/pocketagent.log 2>&1 &
+echo "PocketAgent runtime started: PID $!"
+sleep 4
+if curl -sS http://localhost:8000/ > /dev/null 2>&1; then
+  echo "  ✅ Health check passed"
+else
+  echo "  ⚠️  Health check failed — /tmp/pocketagent.log:"
+  tail -15 /tmp/pocketagent.log
+fi
+
+# 6. Helpful message
+cat <<EOF
 
 === PocketAgent ready ===
 Workspace:  ~/workspace  (your agent's "own computer")
-Runtime:    cd cloud/runtime && uvicorn app.main:app --reload
-Endpoint:   http://localhost:8000  (publicly: https://<codespace>-8000.app.github.dev)
-
-Set your channel secret:
-  export PA_CHANNEL_SECRET="<any-strong-secret>"
+Runtime:    running on port 8000
+Endpoint:   https://${CODESPACE_NAME:-codespace}-8000.app.github.dev
+Channel:    set PA_CHANNEL_SECRET in your phone app's onboarding
 EOF
