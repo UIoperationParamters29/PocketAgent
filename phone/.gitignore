@@ -1,0 +1,14 @@
+node_modules/
+.expo/
+dist/
+web-build/
+*.tsbuildinfo
+android/
+ios/
+.env
+*.log
+.DS_Store
+
+# Local APK output
+*.apk
+*.aab

@@ -1,0 +1,215 @@
+/**
+ * ChatScreen — the main PocketAgent UI.
+ *
+ * Top bar: codespace wake/sleep control + connection status.
+ * Middle: chat history (FlatList, inverted-ish for chat UX).
+ * Bottom: ChatInput.
+ *
+ * Side cards render inline in the message stream:
+ *   - TodoList (sticky above chat)
+ *   - QuestionCard (when pendingQuestion is set)
+ *   - OutlineCard (when outline is set)
+ *   - CompleteCard (when completion is set)
+ */
+
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import {
+  View, Text, FlatList, TouchableOpacity, StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator, Alert,
+} from 'react-native';
+import { colors, spacing, radius, typography } from '../theme/colors';
+import { useStore } from '../state/store';
+import { useAgentSession } from '../hooks/useAgentSession';
+import {
+  MessageBubble, ChatInput, TodoList, QuestionCard, OutlineCard, CompleteCard, StatusBar,
+} from '../components';
+import { ChatMessage } from '../lib/types';
+import {
+  loadGithubPat, loadCodespaceName, saveCodespaceName,
+} from '../lib/secure-store';
+import { getCodespace, startCodespace, stopCodespace, waitUntilAvailable, listCodespaces } from '../lib/codespaces';
+
+export function ChatScreen() {
+  const store = useStore();
+  const session = useAgentSession();
+  const flatListRef = useRef<FlatList<ChatMessage>>(null);
+  const [waking, setWaking] = useState(false);
+
+  // Auto-scroll to bottom on new messages
+  useEffect(() => {
+    if (store.messages.length > 0) {
+      setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 50);
+    }
+  }, [store.messages.length, store.streamingText]);
+
+  const wakeCodespace = useCallback(async () => {
+    if (waking) return;
+    setWaking(true);
+    store.setConnStatus('waking-codespace');
+    try {
+      const pat = await loadGithubPat();
+      if (!pat) { Alert.alert('No GitHub PAT', 'Re-onboard to set one.'); return; }
+      let name = await loadCodespaceName();
+      if (!name) {
+        // List codespaces, pick the first one
+        const list = await listCodespaces(pat);
+        if (list.length === 0) {
+          Alert.alert('No codespace', 'Create one on github.com/codespaces (use the PocketAgent repo + devcontainer).');
+          return;
+        }
+        name = list[0].name;
+        await saveCodespaceName(name);
+      }
+      store.setCodespace(null, name, null);
+
+      // Check state; start if stopped
+      const status = await getCodespace(pat, name);
+      store.setCodespace(status.state, name, null);
+      if (status.state !== 'Available') {
+        await startCodespace(pat, name);
+      }
+
+      // Wait for Available + derive runtime URL
+      const result = await waitUntilAvailable(pat, name, {
+        timeoutMs: 180_000,
+        intervalMs: 3_000,
+        onPoll: (s) => store.setCodespace(s, name, null),
+      });
+      store.setCodespace('Available', name, result.runtime_url);
+
+      // Now connect the WS
+      await session.connect();
+    } catch (e: any) {
+      Alert.alert('Wake failed', e.message);
+      store.setConnStatus('error');
+    } finally {
+      setWaking(false);
+    }
+  }, [waking, store, session]);
+
+  const sleepCodespace = useCallback(async () => {
+    const pat = await loadGithubPat();
+    const name = await loadCodespaceName();
+    if (!pat || !name) return;
+    Alert.alert('Stop codespace?', 'The codespace will keep its 15GB of storage but stop consuming your free core-hours.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Stop', style: 'destructive', onPress: async () => {
+        session.disconnect();
+        try { await stopCodespace(pat, name); store.setCodespace('Stopped', name, null); } catch (e: any) { Alert.alert('Stop failed', e.message); }
+      } },
+    ]);
+  }, [session, store]);
+
+  const onSend = useCallback((text: string) => {
+    session.sendMessage(text);
+  }, [session]);
+
+  const onAnswer = useCallback((answers: any[]) => {
+    if (store.pendingQuestion) {
+      session.answerQuestion(store.pendingQuestion.question_id, answers);
+    }
+  }, [session, store.pendingQuestion]);
+
+  const isConnected = store.connStatus === 'connected';
+
+  return (
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+    >
+      {/* Top bar */}
+      <View style={styles.topBar}>
+        <Text style={styles.brand}>PocketAgent</Text>
+        <View style={styles.topActions}>
+          {store.codespaceName ? (
+            <TouchableOpacity style={styles.csBadge} onPress={isConnected ? sleepCodespace : wakeCodespace} disabled={waking}>
+              {waking ? (
+                <ActivityIndicator size="small" color={colors.warning} />
+              ) : (
+                <View style={[styles.csDot, { backgroundColor: isConnected ? colors.success : colors.warning }]} />
+              )}
+              <Text style={styles.csBadgeText}>{store.codespaceState || '—'}</Text>
+            </TouchableOpacity>
+          ) : null}
+          {!isConnected && !waking && (
+            <TouchableOpacity style={styles.wakeBtn} onPress={wakeCodespace}>
+              <Text style={styles.wakeBtnText}>Wake</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
+
+      <StatusBar status={store.connStatus} codespaceState={store.codespaceState} />
+
+      {/* Side cards (todos, outline, completion) */}
+      <View style={styles.sideCards}>
+        {store.todos.length > 0 && <TodoList todos={store.todos} />}
+        {store.outline && (
+          <OutlineCard
+            documentType={store.outline.document_type}
+            sections={store.outline.sections}
+            design={store.outline.design}
+          />
+        )}
+        {store.completion && (
+          <CompleteCard
+            projectType={store.completion.project_type}
+            summary={store.completion.summary}
+          />
+        )}
+      </View>
+
+      {/* Chat history */}
+      <FlatList
+        ref={flatListRef}
+        data={store.messages}
+        keyExtractor={(m) => m.id}
+        renderItem={({ item }) => <MessageBubble msg={item} />}
+        contentContainerStyle={styles.chatList}
+        onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: false })}
+        ListEmptyComponent={
+          <View style={styles.empty}>
+            <Text style={styles.emptyTitle}>Your agent is ready</Text>
+            <Text style={styles.emptyDesc}>
+              Tell it what you need. It has its own Linux computer — it can run scripts, install tools, read & write files, and ship deliverables to download/.
+            </Text>
+          </View>
+        }
+      />
+
+      {/* Pending question */}
+      {store.pendingQuestion && (
+        <View style={styles.questionOverlay}>
+          <QuestionCard
+            questions={store.pendingQuestion.questions}
+            onAnswer={onAnswer}
+          />
+        </View>
+      )}
+
+      {/* Input */}
+      <ChatInput
+        onSend={onSend}
+        disabled={!isConnected || store.isAgentBusy || !!store.pendingQuestion}
+        placeholder={isConnected ? (store.isAgentBusy ? 'Agent is working…' : 'Message your agent…') : 'Wake the codespace first'}
+      />
+    </KeyboardAvoidingView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: colors.bg },
+  topBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.md, paddingTop: spacing.xl + spacing.sm, paddingBottom: spacing.sm, backgroundColor: colors.bg },
+  brand: { color: colors.text, fontFamily: typography.sans, fontSize: typography.size.lg, fontWeight: '700' },
+  topActions: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  csBadge: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, backgroundColor: colors.surfaceAlt, paddingHorizontal: spacing.md, paddingVertical: spacing.xs, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.border },
+  csDot: { width: 8, height: 8, borderRadius: 4 },
+  csBadgeText: { color: colors.textSecondary, fontFamily: typography.mono, fontSize: typography.size.xs },
+  wakeBtn: { backgroundColor: colors.accent, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderRadius: radius.pill },
+  wakeBtnText: { color: '#fff', fontFamily: typography.sans, fontSize: typography.size.sm, fontWeight: '600' },
+  chatList: { padding: spacing.md, paddingTop: spacing.sm },
+  empty: { padding: spacing.xl, alignItems: 'center', gap: spacing.sm, marginTop: spacing.xl * 2 },
+  emptyTitle: { color: colors.text, fontFamily: typography.sans, fontSize: typography.size.lg, fontWeight: '600' },
+  emptyDesc: { color: colors.textSecondary, fontFamily: typography.sans, fontSize: typography.size.sm, lineHeight: 20, textAlign: 'center', maxWidth: 300 },
+  questionOverlay: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm, backgroundColor: colors.bg, borderTopWidth: 1, borderTopColor: colors.border },
+  sideCards: { paddingHorizontal: spacing.md, paddingVertical: spacing.xs, gap: spacing.xs },
+});
