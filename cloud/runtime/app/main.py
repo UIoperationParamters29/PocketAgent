@@ -1,15 +1,22 @@
 """PocketAgent FastAPI app — the cloud's front door.
 
-Two endpoints:
+Endpoints:
   GET  /              → health + version
   GET  /workspace     → JSON snapshot of the workspace tree (for the phone's file explorer)
   WS   /agent         → the main streaming channel (phone ↔ agent)
 
 Auth: Bearer token in `Authorization` header (or first WS frame), matching
 settings.channel_secret. If channel_secret is empty (local dev), auth is skipped.
+
+Bidirectional flow:
+  The agent loop and the WS reader run as concurrent tasks. The agent emits
+  events via UserResponder.send_event (which writes to the WS). The WS reader
+  handles user.message AND user.answer frames — the latter resolves futures
+  that AskUserQuestion is awaiting.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
@@ -18,10 +25,9 @@ from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from . import __version__
-from .agent import Session, run_agent_loop
+from .agent import Session, UserResponder, run_agent_loop
 from .config import settings
 
 
@@ -30,10 +36,8 @@ from .config import settings
 # --------------------------------------------------------------------------- #
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Ensure workspace dirs exist (also done in Settings validator, but double-safe)
     for sub in ("download", "scripts", "upload", "skills", ".pocketagent"):
         (settings.workspace_root / sub).mkdir(parents=True, exist_ok=True)
-    # Generate an ephemeral channel secret if none set
     if not settings.channel_secret:
         ephem = os.urandom(16).hex()
         settings.channel_secret = ephem
@@ -47,7 +51,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — wide open (the phone connects from anywhere; auth is via channel_secret)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -72,11 +75,15 @@ async def root():
 
 @app.get("/workspace")
 async def workspace_tree(depth: int = 3):
-    """Return a JSON snapshot of the workspace tree for the phone's file explorer."""
+    """JSON snapshot of the workspace tree for the phone's file explorer."""
     root = settings.workspace_root.resolve()
 
     def build(p: Path, d: int) -> dict[str, Any]:
-        node: dict[str, Any] = {"name": p.name or str(p), "path": str(p.relative_to(root)) if p != root else "", "type": "dir" if p.is_dir() else "file"}
+        node: dict[str, Any] = {
+            "name": p.name or str(p),
+            "path": str(p.relative_to(root)) if p != root else "",
+            "type": "dir" if p.is_dir() else "file",
+        }
         if p.is_dir() and d > 0:
             try:
                 node["children"] = [build(c, d - 1) for c in sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))]
@@ -92,6 +99,37 @@ async def workspace_tree(depth: int = 3):
     return build(root, depth)
 
 
+@app.get("/file")
+async def read_file(path: str):
+    """Read a single file's contents (for the phone's file viewer)."""
+    from .tools.registry import _resolve_safe
+    try:
+        p = _resolve_safe(path, must_exist=True)
+        if not p.is_file():
+            return {"ok": False, "error": "not a file"}
+        # Cap at 200KB for the phone viewer
+        data = p.read_bytes()
+        if len(data) > 200_000:
+            return {"ok": True, "path": str(p), "truncated": True, "size": len(data), "content": data[:200_000].decode("utf-8", errors="replace")}
+        return {"ok": True, "path": str(p), "truncated": False, "size": len(data), "content": data.decode("utf-8", errors="replace")}
+    except (PermissionError, FileNotFoundError) as e:
+        return {"ok": False, "error": str(e)}
+
+
+# --------------------------------------------------------------------------- #
+# Responder that writes to a WebSocket
+# --------------------------------------------------------------------------- #
+class WSResponder(UserResponder):
+    """A UserResponder whose send_event writes JSON to a WebSocket."""
+
+    def __init__(self, ws: WebSocket):
+        super().__init__()
+        self.ws = ws
+
+    async def send_event(self, evt: dict[str, Any]) -> None:
+        await self.ws.send_json(evt)
+
+
 # --------------------------------------------------------------------------- #
 # WebSocket — the main channel
 # --------------------------------------------------------------------------- #
@@ -103,26 +141,22 @@ async def agent_ws(ws: WebSocket):
         {
           "type": "session.start",
           "channel_secret": "<matches PA_CHANNEL_SECRET>",
-          "session": {
-            "base_url": "https://api.openai.com/v1",   # BYOK endpoint
-            "api_key":  "sk-...",                       # BYOK key — NEVER stored
-            "model":    "gpt-4o-mini"
-          },
-          "resume_session_id": null                     # or a previous session_id
+          "session": {"base_url": "...", "api_key": "...", "model": "..."},
+          "resume_session_id": null
         }
 
-    Then phone sends `{"type": "user.message", "content": "..."}` frames.
-    Server streams events back. Phone can send further user.message frames
-    to continue the conversation (session.messages accumulates).
+    Then phone sends:
+        {"type": "user.message", "content": "..."}    → starts a turn
+        {"type": "user.answer", "question_id": "...", "answer": {...}}  → resolves AskUserQuestion
+        {"type": "ping"}
+        {"type": "session.reset"}
     """
     # ----- Auth -----
-    # Check header first (some WS clients can set it)
     auth = ws.headers.get("authorization", "")
     token = auth.removeprefix("Bearer ").strip() if auth else ""
     await ws.accept()
 
     if settings.channel_secret and token != settings.channel_secret:
-        # Allow auth via first frame instead
         try:
             first = await ws.receive_json()
             if first.get("type") == "session.start" and first.get("channel_secret") == settings.channel_secret:
@@ -152,9 +186,6 @@ async def agent_ws(ws: WebSocket):
     # ----- Build session -----
     cfg = start_frame.get("session", {}) or {}
     resume_id = start_frame.get("resume_session_id")
-    # BYOK: the phone MUST send an api_key. We do NOT silently fall back to
-    # the server's default_api_key (which is for local dev only) — that would
-    # mask a real misconfiguration on the phone.
     sent_key = cfg.get("api_key", "")
     if not sent_key:
         await ws.send_json({"type": "error", "message": "no api_key in session config (BYOK required)", "kind": "config"})
@@ -167,6 +198,7 @@ async def agent_ws(ws: WebSocket):
         model=cfg.get("model", settings.default_model),
     )
 
+    responder = WSResponder(ws)
     await ws.send_json({
         "type": "session.start",
         "session_id": session.session_id,
@@ -176,7 +208,8 @@ async def agent_ws(ws: WebSocket):
         "resumed": resume_id is not None,
     })
 
-    # ----- Main loop -----
+    # ----- Main loop: read frames, spawn agent turns, multiplex answers -----
+    current_task: Optional[asyncio.Task] = None
     try:
         while True:
             try:
@@ -184,21 +217,53 @@ async def agent_ws(ws: WebSocket):
             except WebSocketDisconnect:
                 break
             mtype = msg.get("type")
+
             if mtype == "user.message":
                 content = msg.get("content", "").strip()
                 if not content:
                     continue
-                # Stream all events from the agent loop
-                async for evt in run_agent_loop(session, content):
-                    await ws.send_json(evt)
+                # If a previous turn is still running, cancel it (user interrupted)
+                if current_task and not current_task.done():
+                    current_task.cancel()
+                    try:
+                        await current_task
+                    except asyncio.CancelledError:
+                        pass
+                # Spawn the new turn as a background task
+                async def _run_turn():
+                    try:
+                        async for evt in run_agent_loop(session, content, responder=responder):
+                            await ws.send_json(evt)
+                    except asyncio.CancelledError:
+                        await ws.send_json({"type": "session.end", "reason": "cancelled", "iterations": session.iterations})
+                        raise
+                    except Exception as e:
+                        await ws.send_json({"type": "error", "message": f"{type(e).__name__}: {e}", "kind": "server"})
+
+                current_task = asyncio.create_task(_run_turn())
+
+            elif mtype == "user.answer":
+                qid = msg.get("question_id")
+                answer = msg.get("answer", {})
+                ok = responder.resolve(qid, answer)
+                if not ok:
+                    await ws.send_json({"type": "warning", "message": f"no pending question for id {qid}"})
+
             elif mtype == "ping":
                 await ws.send_json({"type": "pong", "ts": __import__("time").time()})
+
             elif mtype == "session.reset":
+                if current_task and not current_task.done():
+                    current_task.cancel()
+                    try: await current_task
+                    except asyncio.CancelledError: pass
                 session.messages = [m for m in session.messages if m.get("role") == "system"]
                 session.iterations = 0
                 await ws.send_json({"type": "session.reset.ack", "session_id": session.session_id})
+
             else:
                 await ws.send_json({"type": "error", "message": f"unknown frame type: {mtype}", "kind": "protocol"})
+
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -206,3 +271,9 @@ async def agent_ws(ws: WebSocket):
             await ws.send_json({"type": "error", "message": f"{type(e).__name__}: {e}", "kind": "server"})
         except Exception:
             pass
+    finally:
+        responder.close()
+        if current_task and not current_task.done():
+            current_task.cancel()
+            try: await current_task
+            except asyncio.CancelledError: pass
