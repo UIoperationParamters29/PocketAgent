@@ -58,18 +58,21 @@ if [ -z "${PA_CHANNEL_SECRET:-}" ]; then
   echo "==============================================================="
 fi
 
-# Kill any stale uvicorn, then start fresh
-pkill -f "uvicorn app.main:app" 2>/dev/null || true
+# Kill any stale uvicorn (but not this script itself — match on python -m uvicorn)
+pkill -f "python.*-m.*uvicorn.*app.main" 2>/dev/null || true
 sleep 1
 cd /workspaces/PocketAgent/cloud/runtime
-nohup python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > /tmp/pocketagent.log 2>&1 &
-echo "PocketAgent runtime started: PID $!"
-sleep 4
+# Start uvicorn detached so it survives the postCreateCommand shell exiting
+setsid nohup python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > /tmp/pocketagent.log 2>&1 < /dev/null &
+UVICORN_PID=$!
+disown $UVICORN_PID 2>/dev/null || true
+echo "PocketAgent runtime started: PID $UVICORN_PID"
+sleep 5
 if curl -sS http://localhost:8000/ > /dev/null 2>&1; then
   echo "  ✅ Health check passed"
 else
   echo "  ⚠️  Health check failed — /tmp/pocketagent.log:"
-  tail -15 /tmp/pocketagent.log
+  tail -25 /tmp/pocketagent.log 2>&1
 fi
 
 # 6. Helpful message
