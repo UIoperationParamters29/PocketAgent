@@ -84,3 +84,24 @@ Runtime:    running on port 8000
 Endpoint:   https://${CODESPACE_NAME:-codespace}-8000.app.github.dev
 Channel:    set PA_CHANNEL_SECRET in your phone app's onboarding
 EOF
+
+# 7. Write a status file to the workspace (so external debugging works).
+# This file is committed on bootstrap, providing an "I'm alive" signal.
+STATUS_FILE=/workspaces/PocketAgent/.codespace-status.md
+cat > "$STATUS_FILE" <<EOF
+# Codespace Status
+
+Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+Codespace: ${CODESPACE_NAME:-unknown}
+Channel secret set: $([ -n "${PA_CHANNEL_SECRET:-}" ] && echo yes || echo no)
+
+## Runtime
+- Local health check: $(curl -sS http://localhost:8000/ > /dev/null 2>&1 && echo OK || echo FAILED)
+- Port 8000 forward URL: https://${CODESPACE_NAME:-codespace}-8000.app.github.dev
+
+## Bootstrap log
+\`\`\`
+$(tail -30 /tmp/pocketagent.log 2>&1)
+\`\`\`
+EOF
+echo "Status file written: $STATUS_FILE"
