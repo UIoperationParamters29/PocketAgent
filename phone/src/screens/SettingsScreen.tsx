@@ -1,10 +1,11 @@
 /**
  * SettingsScreen — edit BYOK config, codespace, see session info, wipe.
+ * Now with: Test connection + Fetch models buttons.
  */
 
 import React, { useEffect, useState } from 'react';
 import {
-  View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Alert, ActivityIndicator,
+  View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Alert, ActivityIndicator, Modal, FlatList,
 } from 'react-native';
 import { colors, spacing, radius, typography } from '../theme/colors';
 import {
@@ -15,6 +16,7 @@ import {
 import { SessionConfig } from '../lib/types';
 import { useStore } from '../state/store';
 import { useAgentSession } from '../hooks/useAgentSession';
+import { fetchModels, verifyLlmConfig, ModelInfo } from '../lib/llm';
 
 export function SettingsScreen({ onWiped }: { onWiped: () => void }) {
   const session = useAgentSession();
@@ -24,6 +26,13 @@ export function SettingsScreen({ onWiped }: { onWiped: () => void }) {
   const [codespaceName, setCodespaceName] = useState('');
   const [cfg, setCfg] = useState<SessionConfig | null>(null);
   const [saving, setSaving] = useState(false);
+
+  // Model fetch + LLM test (mirrors OnboardingScreen)
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [showModelPicker, setShowModelPicker] = useState(false);
+  const [testingLlm, setTestingLlm] = useState(false);
+  const [llmTestResult, setLlmTestResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -149,14 +158,77 @@ export function SettingsScreen({ onWiped }: { onWiped: () => void }) {
           <TextInput
             style={styles.input}
             value={cfg.base_url}
-            onChangeText={(v) => setCfg({ ...cfg, base_url: v })}
+            onChangeText={(v) => { setCfg({ ...cfg, base_url: v }); setLlmTestResult(null); setModels([]); }}
             placeholder="https://api.openai.com/v1"
             placeholderTextColor={colors.textTertiary}
             autoCapitalize="none"
             autoCorrect={false}
           />
+
+          {/* Fetch models + Test connection */}
+          <View style={styles.buttonRow}>
+            <TouchableOpacity
+              style={[styles.auxBtn, (!cfg.base_url || !cfg.api_key || fetchingModels) && styles.auxBtnDisabled]}
+              onPress={async () => {
+                setFetchingModels(true);
+                try {
+                  const list = await fetchModels(cfg.base_url, cfg.api_key);
+                  setModels(list);
+                  if (list.length > 0) setShowModelPicker(true);
+                  else Alert.alert('No models', 'Provider returned 0 models.');
+                } catch (e: any) { Alert.alert('Fetch failed', e.message); }
+                finally { setFetchingModels(false); }
+              }}
+              disabled={!cfg.base_url || !cfg.api_key || fetchingModels}
+            >
+              {fetchingModels ? <ActivityIndicator color={colors.accent} size="small" /> : <Text style={styles.auxBtnText}>Fetch models</Text>}
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.auxBtn, (!cfg.base_url || !cfg.api_key || !cfg.model || testingLlm) && styles.auxBtnDisabled]}
+              onPress={async () => {
+                setTestingLlm(true); setLlmTestResult(null);
+                const r = await verifyLlmConfig(cfg.base_url, cfg.api_key, cfg.model);
+                setLlmTestResult(r.ok ? { ok: true, message: `✓ OK — reply: ${r.reply?.slice(0, 50) || '(empty)'}` } : { ok: false, message: `✗ ${r.error}` });
+                setTestingLlm(false);
+              }}
+              disabled={!cfg.base_url || !cfg.api_key || !cfg.model || testingLlm}
+            >
+              {testingLlm ? <ActivityIndicator color={colors.accent} size="small" /> : <Text style={styles.auxBtnText}>Test</Text>}
+            </TouchableOpacity>
+          </View>
+          {llmTestResult && (
+            <Text style={[styles.testResult, llmTestResult.ok ? styles.testOk : styles.testFail]}>
+              {llmTestResult.message}
+            </Text>
+          )}
         </View>
       )}
+
+      {/* Model picker modal */}
+      <Modal visible={showModelPicker} animationType="slide" transparent={true} onRequestClose={() => setShowModelPicker(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Pick a model ({models.length})</Text>
+            <FlatList
+              data={models}
+              keyExtractor={(m) => m.id}
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  style={[styles.modelItem, cfg?.model === item.id && styles.modelItemSelected]}
+                  onPress={() => { setCfg({ ...(cfg as SessionConfig), model: item.id }); setShowModelPicker(false); setLlmTestResult(null); }}
+                >
+                  <Text style={styles.modelItemId}>{item.id}</Text>
+                  {item.label && item.label !== item.id ? <Text style={styles.modelItemLabel}>{item.label}</Text> : null}
+                </TouchableOpacity>
+              )}
+              style={{ maxHeight: 400 }}
+            />
+            <TouchableOpacity style={styles.modalClose} onPress={() => setShowModelPicker(false)}>
+              <Text style={styles.modalCloseText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       {/* Session info */}
       <View style={styles.section}>
@@ -201,4 +273,20 @@ const styles = StyleSheet.create({
   saveBtnText: { color: '#fff', fontFamily: typography.sans, fontSize: typography.size.md, fontWeight: '600' },
   wipeBtn: { backgroundColor: colors.errorSoft, borderRadius: radius.md, paddingVertical: spacing.md, alignItems: 'center', borderWidth: 1, borderColor: colors.error + '44' },
   wipeBtnText: { color: colors.error, fontFamily: typography.sans, fontSize: typography.size.md, fontWeight: '600' },
+  buttonRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm },
+  auxBtn: { flex: 1, paddingVertical: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
+  auxBtnDisabled: { borderColor: colors.border, opacity: 0.5 },
+  auxBtnText: { color: colors.accent, fontFamily: typography.sans, fontSize: typography.size.sm, fontWeight: '600' },
+  testResult: { fontFamily: typography.mono, fontSize: typography.size.xs, marginTop: spacing.xs, padding: spacing.sm, borderRadius: radius.sm },
+  testOk: { color: colors.success, backgroundColor: colors.successSoft },
+  testFail: { color: colors.error, backgroundColor: colors.errorSoft },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center', padding: spacing.lg },
+  modalContent: { backgroundColor: colors.surface, borderRadius: radius.lg, padding: spacing.lg, width: '100%', maxHeight: '80%' },
+  modalTitle: { color: colors.text, fontFamily: typography.sans, fontSize: typography.size.lg, fontWeight: '600', marginBottom: spacing.md },
+  modelItem: { paddingVertical: spacing.md, paddingHorizontal: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.borderSubtle, gap: 2 },
+  modelItemSelected: { backgroundColor: colors.accentSoft, borderRadius: radius.sm },
+  modelItemId: { color: colors.text, fontFamily: typography.mono, fontSize: typography.size.sm },
+  modelItemLabel: { color: colors.textSecondary, fontFamily: typography.sans, fontSize: typography.size.xs },
+  modalClose: { marginTop: spacing.md, paddingVertical: spacing.md, alignItems: 'center' },
+  modalCloseText: { color: colors.accent, fontFamily: typography.sans, fontSize: typography.size.md, fontWeight: '600' },
 });

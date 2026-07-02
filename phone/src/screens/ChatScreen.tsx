@@ -26,7 +26,7 @@ import { ChatMessage } from '../lib/types';
 import {
   loadGithubPat, loadCodespaceName, saveCodespaceName,
 } from '../lib/secure-store';
-import { getCodespace, startCodespace, stopCodespace, waitUntilAvailable, listCodespaces } from '../lib/codespaces';
+import { getCodespace, startCodespace, stopCodespace, waitUntilAvailable, listCodespaces, createCodespace } from '../lib/codespaces';
 
 export function ChatScreen() {
   const store = useStore();
@@ -47,13 +47,51 @@ export function ChatScreen() {
     store.setConnStatus('waking-codespace');
     try {
       const pat = await loadGithubPat();
-      if (!pat) { Alert.alert('No GitHub PAT', 'Re-onboard to set one.'); return; }
+      if (!pat || !pat.trim()) {
+        Alert.alert(
+          'No GitHub PAT',
+          'Go to Settings → GitHub PAT and paste a Personal Access Token with the repo, codespace, workflow scopes.',
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+
       let name = await loadCodespaceName();
       if (!name) {
-        // List codespaces, pick the first one
-        const list = await listCodespaces(pat);
+        // List codespaces; if any exist, use the first PocketAgent one (or the first overall)
+        let list;
+        try {
+          list = await listCodespaces(pat);
+        } catch (e: any) {
+          Alert.alert(
+            'GitHub API error',
+            `Couldn't list your codespaces: ${e.message}\n\nCheck that your PAT has the 'codespace' scope.`,
+            [{ text: 'OK' }]
+          );
+          return;
+        }
         if (list.length === 0) {
-          Alert.alert('No codespace', 'Create one on github.com/codespaces (use the PocketAgent repo + devcontainer).');
+          // No codespace exists — offer to create one
+          Alert.alert(
+            'No codespace yet',
+            'You don\'t have any codespaces. PocketAgent can create one for you from the PocketAgent repo.',
+            [
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Create it', onPress: async () => {
+                try {
+                  store.setCodespace('Provisioning', null, null);
+                  const cs = await createCodespace(pat, 'UIoperationParamters29/PocketAgent');
+                  await saveCodespaceName(cs.name);
+                  store.setCodespace(cs.state, cs.name, null);
+                  // Continue with the wake flow
+                  setTimeout(() => wakeCodespace(), 500);
+                } catch (e: any) {
+                  Alert.alert('Create failed', e.message);
+                  store.setConnStatus('error');
+                }
+              }},
+            ]
+          );
           return;
         }
         name = list[0].name;
@@ -62,24 +100,57 @@ export function ChatScreen() {
       store.setCodespace(null, name, null);
 
       // Check state; start if stopped
-      const status = await getCodespace(pat, name);
+      let status;
+      try {
+        status = await getCodespace(pat, name);
+      } catch (e: any) {
+        Alert.alert(
+          'Codespace not found',
+          `Couldn't find codespace "${name}": ${e.message}\n\nGo to Settings → Codespace name and clear it to re-detect, or create a new one on github.com/codespaces.`,
+          [{ text: 'OK' }]
+        );
+        return;
+      }
       store.setCodespace(status.state, name, null);
       if (status.state !== 'Available') {
-        await startCodespace(pat, name);
+        try {
+          await startCodespace(pat, name);
+        } catch (e: any) {
+          Alert.alert('Start failed', `Couldn't start codespace: ${e.message}`);
+          return;
+        }
       }
 
       // Wait for Available + derive runtime URL
-      const result = await waitUntilAvailable(pat, name, {
-        timeoutMs: 180_000,
-        intervalMs: 3_000,
-        onPoll: (s) => store.setCodespace(s, name, null),
-      });
+      let result;
+      try {
+        result = await waitUntilAvailable(pat, name, {
+          timeoutMs: 240_000,
+          intervalMs: 3_000,
+          onPoll: (s) => store.setCodespace(s, name, null),
+        });
+      } catch (e: any) {
+        Alert.alert(
+          'Codespace timeout',
+          `Codespace didn't become Available in time: ${e.message}\n\nIt may still be provisioning. Try Wake again in a minute, or open it once at github.com/codespaces to speed things up.`,
+          [{ text: 'OK' }]
+        );
+        return;
+      }
       store.setCodespace('Available', name, result.runtime_url);
 
       // Now connect the WS
-      await session.connect();
+      const ok = await session.connect();
+      if (!ok) {
+        // session.connect already set the error message
+        Alert.alert(
+          'Connect failed',
+          'Codespace is up but the WebSocket connection failed. Make sure:\n• The codespace was opened in a browser at least once (to register the port forward)\n• PA_CHANNEL_SECRET matches between the app and your Codespaces secrets\n• The runtime is running inside the codespace (open the codespace, check the terminal)',
+          [{ text: 'OK' }]
+        );
+      }
     } catch (e: any) {
-      Alert.alert('Wake failed', e.message);
+      Alert.alert('Wake failed', `${e.message || e}`);
       store.setConnStatus('error');
     } finally {
       setWaking(false);

@@ -70,6 +70,32 @@ export async function listCodespaces(pat: string): Promise<CodespaceStatus[]> {
   }));
 }
 
+export async function createCodespace(
+  pat: string,
+  repoFullName: string,
+  branch: string = 'main',
+  machine: string = 'basicLinux32gb'
+): Promise<CodespaceStatus> {
+  // Get the repo ID first
+  const repoResp = await gh<{ id: number }>(pat, `/repos/${repoFullName}`);
+  const repoId = repoResp.id;
+  const data = await gh<Codespace>(pat, '/user/codespaces', {
+    method: 'POST',
+    body: JSON.stringify({
+      repository_id: repoId,
+      ref: branch,
+      machine,
+    }),
+  });
+  return {
+    name: data.name,
+    state: data.state,
+    repository: data.repository?.full_name || '',
+    machine: data.machine?.display_name || '',
+    last_used_at: data.last_used_at,
+  };
+}
+
 export async function getCodespace(pat: string, name: string): Promise<CodespaceStatus> {
   const c = await gh<Codespace>(pat, `/user/codespaces/${name}`);
   return {
