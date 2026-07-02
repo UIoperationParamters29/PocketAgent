@@ -6,6 +6,7 @@
     "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
   },
   "postCreateCommand": "bash .devcontainer/bootstrap.sh",
+  "postStartCommand": "bash .devcontainer/start-runtime.sh",
   "forwardPorts": [8000],
   "portsAttributes": {
     "8000": {
