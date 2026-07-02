@@ -26,3 +26,7 @@ phone/android/
 phone/ios/
 phone/*.apk
 phone/*.aab
+keys/
+**/credentials.env
+**/release.keystore
+**/*.keystore
