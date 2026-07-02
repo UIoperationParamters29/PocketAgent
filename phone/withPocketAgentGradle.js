@@ -3,19 +3,48 @@
  * version mismatch between Expo SDK 52 (Kotlin 1.9.24) and
  * expo-modules-core's Compose Compiler 1.5.15 (which wants Kotlin 1.9.25).
  *
- * Approach: pin the Compose Compiler to 1.5.14 which is compatible with
- * Kotlin 1.9.24, by setting kotlinCompilerExtensionVersion in composeOptions.
+ * Approach: force-downgrade androidx.compose.compiler:compiler to 1.5.14
+ * (the version compatible with Kotlin 1.9.24) at the project level so it
+ * applies to ALL modules including expo-modules-core.
+ *
+ * Also sets kotlinCompilerExtensionVersion on the app's composeOptions.
  */
 
-const { withAppBuildGradle } = require('@expo/config-plugins');
+const { withAppBuildGradle, withProjectBuildGradle } = require('@expo/config-plugins');
 
 module.exports = (config) => {
-  return withAppBuildGradle(config, (mod) => {
+  // 1. Force the Compose Compiler dependency to 1.5.14 at the project level
+  config = withProjectBuildGradle(config, (mod) => {
     let buildGradle = mod.modResults.contents;
+    if (!buildGradle.includes('force.*compose.compiler') && !buildGradle.includes('androidx.compose.compiler:compiler')) {
+      // Inject a force block into the buildscript's dependencies OR the allprojects
+      // The cleanest: add to the allprojects repositories { } block as a resolutionStrategy
+      // Look for "allprojects {" or just append before the final closing brace
+      const forceBlock = `
+    configurations.all {
+        resolutionStrategy {
+            force 'androidx.compose.compiler:compiler:1.5.14'
+        }
+    }`;
+      // Insert after "allprojects {" if it exists; otherwise wrap it
+      if (/^allprojects\s*{/m.test(buildGradle)) {
+        buildGradle = buildGradle.replace(
+          /^allprojects\s*{/m,
+          'allprojects {' + forceBlock
+        );
+      } else {
+        // Append a new allprojects block
+        buildGradle += '\nallprojects {' + forceBlock + '\n}\n';
+      }
+    }
+    mod.modResults.contents = buildGradle;
+    return mod;
+  });
 
+  // 2. Also pin kotlinCompilerExtensionVersion in the app's composeOptions
+  config = withAppBuildGradle(config, (mod) => {
+    let buildGradle = mod.modResults.contents;
     if (!buildGradle.includes('kotlinCompilerExtensionVersion')) {
-      // Insert composeOptions block inside the android { ... } block
-      // Find the first 'android {' (top-level) and inject after it
       const androidMatch = buildGradle.match(/^android\s*\{/m);
       if (androidMatch) {
         const insertAt = androidMatch.index + androidMatch[0].length;
@@ -26,8 +55,9 @@ module.exports = (config) => {
         buildGradle = buildGradle.slice(0, insertAt) + injection + buildGradle.slice(insertAt);
       }
     }
-
     mod.modResults.contents = buildGradle;
     return mod;
   });
+
+  return config;
 };
