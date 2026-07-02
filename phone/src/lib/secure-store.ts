@@ -117,6 +117,22 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     signup_url: 'https://z.ai',
   },
   {
+    id: 'anthropic',
+    label: 'Anthropic',
+    base_url: 'https://api.anthropic.com/v1',
+    default_model: 'claude-3-5-sonnet-20241022',
+    key_prefix: 'sk-ant-...',
+    signup_url: 'https://console.anthropic.com/settings/keys',
+  },
+  {
+    id: 'gemini',
+    label: 'Google Gemini',
+    base_url: 'https://generativelanguage.googleapis.com/v1beta',
+    default_model: 'gemini-1.5-pro',
+    key_prefix: 'AIza...',
+    signup_url: 'https://aistudio.google.com/app/apikey',
+  },
+  {
     id: 'openrouter',
     label: 'OpenRouter',
     base_url: 'https://openrouter.ai/api/v1',

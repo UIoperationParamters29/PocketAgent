@@ -23,6 +23,7 @@ from typing import Any, AsyncIterator, Optional
 from openai import AsyncOpenAI
 
 from .config import settings
+from .llm import stream_chat, StreamEvent
 from .tools import ToolContext, call_tool, tools_for_depth
 
 
@@ -177,9 +178,21 @@ def _load_agents_md() -> str:
 
 
 def _client(session: Session) -> AsyncOpenAI:
+    """DEPRECATED — kept for test backwards-compat. Use stream_chat() directly."""
     if not session.api_key:
         raise ValueError("No API key for this session — the phone must send one on connect.")
     return AsyncOpenAI(base_url=session.base_url, api_key=session.api_key)
+
+
+def _stream_for_session(session: Session, messages: list[dict], tools: list[dict]):
+    """Return an async iterator of StreamEvent from the right provider."""
+    return stream_chat(
+        base_url=session.base_url,
+        api_key=session.api_key,
+        model=session.model,
+        messages=messages,
+        tools=tools,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -209,41 +222,34 @@ async def run_agent_loop(
             sys_prompt = _subagent_system_prompt("general-purpose", depth)
         session.messages.insert(0, {"role": "system", "content": sys_prompt})
 
-    client = _client(session)
+    client = _stream_for_session  # function reference; called below
     tools = tools_for_depth(depth)
 
     while session.iterations < session.max_iterations:
         session.iterations += 1
 
-        # ----- Stream the LLM -----
+        # ----- Stream the LLM (provider-agnostic) -----
         assistant_text = ""
         tool_calls: list[dict[str, Any]] = []
         try:
-            stream = await client.chat.completions.create(
-                model=session.model,
-                messages=session.messages,
-                tools=tools,
-                tool_choice="auto",
-                stream=True,
-            )
-            async for chunk in stream:
-                delta = chunk.choices[0].delta if chunk.choices else None
-                if not delta:
-                    continue
-                if delta.content:
-                    assistant_text += delta.content
-                    yield _evt("assistant.delta", content=delta.content)
-                if delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        idx = tc.index
-                        while len(tool_calls) <= idx:
-                            tool_calls.append({"id": "", "name": "", "args": ""})
-                        if tc.id:
-                            tool_calls[idx]["id"] = tc.id
-                        if tc.function and tc.function.name:
-                            tool_calls[idx]["name"] = tc.function.name
-                        if tc.function and tc.function.arguments:
-                            tool_calls[idx]["args"] += tc.function.arguments
+            async for evt in client(session, session.messages, tools):
+                if evt.kind == "delta":
+                    assistant_text += evt.text
+                    yield _evt("assistant.delta", content=evt.text)
+                elif evt.kind == "tool_call_start":
+                    idx = evt.tool_index
+                    while len(tool_calls) <= idx:
+                        tool_calls.append({"id": "", "name": "", "args": ""})
+                    if evt.tool_id:
+                        tool_calls[idx]["id"] = evt.tool_id
+                    if evt.tool_name:
+                        tool_calls[idx]["name"] = evt.tool_name
+                elif evt.kind == "tool_call_delta":
+                    idx = evt.tool_index
+                    while len(tool_calls) <= idx:
+                        tool_calls.append({"id": "", "name": "", "args": ""})
+                    tool_calls[idx]["args"] += evt.tool_args_delta
+                # 'done' is implicit — we just stop iterating
         except Exception as e:
             yield _evt("error", message=f"LLM error: {type(e).__name__}: {e}", kind="llm")
             return

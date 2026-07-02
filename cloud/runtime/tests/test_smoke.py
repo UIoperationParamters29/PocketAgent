@@ -25,6 +25,7 @@ from app.tools import TOOLS, call_tool, to_openai_tools  # noqa: E402
 from app.tools.registry import _resolve_safe  # noqa: E402
 from app.tools import ToolContext  # noqa: E402
 from app.agent import Session, UserResponder, run_agent_loop  # noqa: E402
+from app.llm import StreamEvent  # noqa: E402
 
 
 def make_ctx(**kw) -> ToolContext:
@@ -85,25 +86,42 @@ async def test_core_tools():
 
 
 async def test_skill_tool():
-    """Skill tool should load a SKILL.md from workspace/skills/."""
+    """Skill tool: list mode, load mode, read mode."""
     ctx = make_ctx()
     # Make a test skill
     skill_dir = settings.workspace_root / "skills" / "test-skill"
     skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / "SKILL.md").write_text("---\nname: test-skill\n---\n# Test Skill\nHello world.")
+    (skill_dir / "SKILL.md").write_text("---\nname: test-skill\ndescription: A test skill for testing.\n---\n# Test Skill\nHello world.")
     (skill_dir / "briefs").mkdir(exist_ok=True)
-    (skill_dir / "briefs" / "test.md").write_text("test brief")
+    (skill_dir / "briefs" / "test.md").write_text("test brief content")
 
+    # list mode
+    r = await call_tool("Skill", {"mode": "list"}, ctx)
+    assert r.ok, r.error
+    assert "test-skill" in r.output, r.output
+    assert "A test skill for testing" in r.output, r.output
+
+    # load mode (default)
     r = await call_tool("Skill", {"name": "test-skill"}, ctx)
     assert r.ok, r.error
     assert "Test Skill" in r.output, r.output
     assert "briefs" in r.output, r.output
+    assert "Drill-down" in r.output, r.output  # the new sub-file listing
+
+    # read mode
+    r = await call_tool("Skill", {"mode": "read", "name": "test-skill", "file": "briefs/test.md"}, ctx)
+    assert r.ok, r.error
+    assert "test brief content" in r.output, r.output
+
+    # read mode with escape attempt
+    r = await call_tool("Skill", {"mode": "read", "name": "test-skill", "file": "../../etc/passwd"}, ctx)
+    assert not r.ok, "escape should be blocked"
 
     # Missing skill returns helpful list
     r = await call_tool("Skill", {"name": "nope"}, ctx)
     assert not r.ok
     assert "test-skill" in r.output, r.output
-    print("[ok] Skill tool loads SKILL.md + lists available")
+    print("[ok] Skill tool: list + load + read + escape-blocked")
 
 
 async def test_outline_and_complete_tools():
@@ -172,37 +190,20 @@ async def test_ask_user_question_tool():
 
 async def test_agent_loop_mocked():
     """Run the agent loop with a fake LLM that issues one tool call, then ends."""
-    from openai.types.chat import ChatCompletionChunk
-    from openai.types.chat.chat_completion_chunk import Choice, ChoiceDelta, ChoiceDeltaToolCall
-
-    class FakeStream:
-        def __init__(self, items): self._items = items
-        def __aiter__(self): self._i = 0; return self
-        async def __anext__(self):
-            if self._i >= len(self._items): raise StopAsyncIteration
-            v = self._items[self._i]; self._i += 1; return v
-
-    class FakeClient:
-        class chat:
-            class completions:
-                @staticmethod
-                async def create(*, model, messages, tools, tool_choice, stream):
-                    if not any(m.get("role") == "tool" for m in messages):
-                        return FakeStream([ChatCompletionChunk(
-                            id="f1", created=0, model=model, object="chat.completion.chunk",
-                            choices=[Choice(index=0, finish_reason="tool_calls", delta=ChoiceDelta(
-                                tool_calls=[ChoiceDeltaToolCall(index=0, id="c1", type="function",
-                                    function={"name": "Write", "arguments": json.dumps({"file_path": "out.txt", "content": "done"})})]
-                            ))]
-                        )])
-                    return FakeStream([ChatCompletionChunk(
-                        id="f2", created=0, model=model, object="chat.completion.chunk",
-                        choices=[Choice(index=0, finish_reason="stop", delta=ChoiceDelta(content="Done!"))]
-                    )])
+    async def fake_stream(*, messages, tools, **kw):
+        # First call: invoke Write tool; second call (after tool result): say done
+        if not any(m.get("role") == "tool" for m in messages):
+            yield StreamEvent(kind="tool_call_start", tool_index=0, tool_id="c1", tool_name="Write")
+            yield StreamEvent(kind="tool_call_delta", tool_index=0,
+                              tool_args_delta=json.dumps({"file_path": "out.txt", "content": "done"}))
+            yield StreamEvent(kind="done", finish_reason="tool_calls")
+        else:
+            yield StreamEvent(kind="delta", text="Done!")
+            yield StreamEvent(kind="done", finish_reason="stop")
 
     import app.agent as agent_mod
-    orig = agent_mod._client
-    agent_mod._client = lambda s: FakeClient()
+    orig = agent_mod._stream_for_session
+    agent_mod._stream_for_session = lambda s, m, t: fake_stream(messages=m, tools=t)
     try:
         s = Session(api_key="fake", model="fake-model")
         events = []
@@ -218,57 +219,35 @@ async def test_agent_loop_mocked():
         print("[ok] agent loop ran end-to-end with mocked LLM")
         print("     events:", types)
     finally:
-        agent_mod._client = orig
+        agent_mod._stream_for_session = orig
 
 
 async def test_subagent_tool_mocked():
     """Task tool spawns a subagent that runs to completion and returns text."""
-    from openai.types.chat import ChatCompletionChunk
-    from openai.types.chat.chat_completion_chunk import Choice, ChoiceDelta
-
-    class FakeStream:
-        def __init__(self, items): self._items = items
-        def __aiter__(self): self._i = 0; return self
-        async def __anext__(self):
-            if self._i >= len(self._items): raise StopAsyncIteration
-            v = self._items[self._i]; self._i += 1; return v
-
-    # Parent: call Task. Subagent: just say "subagent result".
-    class FakeClient:
-        class chat:
-            class completions:
-                @staticmethod
-                async def create(*, model, messages, tools, tool_choice, stream):
-                    # Subagent: system prompt starts with "You are a PocketAgent subagent"
-                    is_sub = any(
-                        (m.get("content") or "").startswith("You are a PocketAgent subagent")
-                        for m in messages if m.get("role") == "system"
-                    )
-                    if is_sub:
-                        return FakeStream([ChatCompletionChunk(
-                            id="s1", created=0, model=model, object="chat.completion.chunk",
-                            choices=[Choice(index=0, finish_reason="stop", delta=ChoiceDelta(content="subagent result"))]
-                        )])
-                    # Parent first call: invoke Task
-                    if not any(m.get("role") == "tool" for m in messages):
-                        return FakeStream([ChatCompletionChunk(
-                            id="p1", created=0, model=model, object="chat.completion.chunk",
-                            choices=[Choice(index=0, finish_reason="tool_calls", delta=ChoiceDelta(
-                                tool_calls=[{
-                                    "index": 0, "id": "c1", "type": "function",
-                                    "function": {"name": "Task", "arguments": json.dumps({"description": "test", "prompt": "just say hi"})}
-                                }]
-                            ))]
-                        )])
-                    # Parent after Task result: final message
-                    return FakeStream([ChatCompletionChunk(
-                        id="p2", created=0, model=model, object="chat.completion.chunk",
-                        choices=[Choice(index=0, finish_reason="stop", delta=ChoiceDelta(content="parent done"))]
-                    )])
+    async def fake_stream(*, messages, tools, **kw):
+        # Subagent: system prompt starts with "You are a PocketAgent subagent"
+        is_sub = any(
+            (m.get("content") or "").startswith("You are a PocketAgent subagent")
+            for m in messages if m.get("role") == "system"
+        )
+        if is_sub:
+            yield StreamEvent(kind="delta", text="subagent result")
+            yield StreamEvent(kind="done", finish_reason="stop")
+            return
+        # Parent first call: invoke Task
+        if not any(m.get("role") == "tool" for m in messages):
+            yield StreamEvent(kind="tool_call_start", tool_index=0, tool_id="c1", tool_name="Task")
+            yield StreamEvent(kind="tool_call_delta", tool_index=0,
+                              tool_args_delta=json.dumps({"description": "test", "prompt": "just say hi"}))
+            yield StreamEvent(kind="done", finish_reason="tool_calls")
+            return
+        # Parent after Task result: final message
+        yield StreamEvent(kind="delta", text="parent done")
+        yield StreamEvent(kind="done", finish_reason="stop")
 
     import app.agent as agent_mod
-    orig = agent_mod._client
-    agent_mod._client = lambda s: FakeClient()
+    orig = agent_mod._stream_for_session
+    agent_mod._stream_for_session = lambda s, m, t: fake_stream(messages=m, tools=t)
 
     # Collect subagent events via a test responder
     class TestResponder(UserResponder):
@@ -285,21 +264,31 @@ async def test_subagent_tool_mocked():
         async for evt in run_agent_loop(s, "delegate to a subagent", responder=responder):
             events.append(evt)
         types = [e["type"] for e in events]
-        # Should see parent's tool.call for Task, then subagent.* events via responder, then tool.result
         assert any(e["type"] == "tool.call" and e["name"] == "Task" for e in events), types
-        # Subagent events are emitted via responder, not yielded by the parent loop
         sub_events = responder.events
         sub_types = [e["type"] for e in sub_events]
         assert "subagent.start" in sub_types, sub_types
         assert "subagent.assistant.message" in sub_types, sub_types
         assert "subagent.end" in sub_types, sub_types
-        # The Task tool result should contain the subagent's final text
         task_result = next(e for e in events if e["type"] == "tool.result" and e["name"] == "Task")
         assert "subagent result" in task_result["output"], task_result["output"]
         print("[ok] Task tool spawns subagent, returns its final answer")
         print("     subagent events:", sub_types)
     finally:
-        agent_mod._client = orig
+        agent_mod._stream_for_session = orig
+
+
+async def test_provider_detection():
+    """The LLM module should detect the right provider from base_url."""
+    from app.llm import detect_provider
+    assert detect_provider("https://api.openai.com/v1") == "openai"
+    assert detect_provider("https://api.z.ai/api/pallet/v1") == "openai"
+    assert detect_provider("https://openrouter.ai/api/v1") == "openai"
+    assert detect_provider("https://api.groq.com/openai/v1") == "openai"
+    assert detect_provider("https://api.anthropic.com/v1") == "anthropic"
+    assert detect_provider("https://generativelanguage.googleapis.com/v1beta") == "gemini"
+    assert detect_provider("https://my-custom-proxy.com/v1") == "openai"  # default
+    print("[ok] provider detection: openai/anthropic/gemini routing correct")
 
 
 async def main():
@@ -312,6 +301,7 @@ async def main():
     await test_ask_user_question_tool()
     await test_agent_loop_mocked()
     await test_subagent_tool_mocked()
+    await test_provider_detection()
     print("\n=== ALL TESTS PASSED ===")
 
 

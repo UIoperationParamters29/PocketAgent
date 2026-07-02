@@ -283,29 +283,110 @@ async def _tool_todowrite(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
 async def _tool_skill(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     """Skill — lazily load a SKILL.md package from the workspace.
 
-    Mirrors z.ai: the agent discovers a skill by name and reads its
-    SKILL.md to learn how to do something it couldn't before.
+    Mirrors z.ai: the agent discovers skills, reads their SKILL.md, then
+    drills into briefs/configs/scripts/references on demand.
+
+    Modes (controlled by `mode`):
+      - list     → list all installed skills (name + description from frontmatter)
+      - load     → read SKILL.md + list subdirs/files (default)
+      - read     → read a specific file inside the skill (briefs/x.md, scripts/y.py, ...)
     """
-    name = args["name"]
-    skill_dir = settings.workspace_root / "skills" / name
-    skill_md = skill_dir / "SKILL.md"
-    if not skill_md.exists():
-        # Available skills list — helps the agent self-correct
-        available = []
-        skills_root = settings.workspace_root / "skills"
-        if skills_root.exists():
-            available = sorted([d.name for d in skills_root.iterdir() if d.is_dir() and (d / "SKILL.md").exists()])
-        return ToolResult(
-            ok=False,
-            error=f"skill '{name}' not found at {skill_md}",
-            output=f"Available skills: {available}" if available else "(no skills installed)",
-        )
-    content = skill_md.read_text(encoding="utf-8", errors="replace")
-    # List subdirs so the agent knows what's available to drill into
-    subdirs = sorted([d.name for d in skill_dir.iterdir() if d.is_dir()])
-    files = sorted([f.name for f in skill_dir.iterdir() if f.is_file() and f.name != "SKILL.md"])
-    header = f"# Skill: {name}\nSubdirs: {subdirs}\nOther files: {files}\n\n---\n\n"
-    return ToolResult(output=header + content)
+    mode = args.get("mode", "load")
+    name = args.get("name", "")
+    skills_root = settings.workspace_root / "skills"
+
+    def _parse_frontmatter(text: str) -> tuple[dict, str]:
+        """Parse YAML frontmatter (---\\n...---\\n) into a dict + body."""
+        if not text.startswith("---"):
+            return {}, text
+        try:
+            end = text.index("\n---", 3)
+            fm = text[3:end].strip()
+            body = text[end + 4:].lstrip("\n")
+            # Tiny YAML parser: just key: value pairs
+            meta: dict = {}
+            for line in fm.splitlines():
+                if ":" in line and not line.startswith(" "):
+                    k, _, v = line.partition(":")
+                    meta[k.strip()] = v.strip().strip('"').strip("'")
+            return meta, body
+        except ValueError:
+            return {}, text
+
+    def _run() -> ToolResult:
+        # ---- list mode ----
+        if mode == "list":
+            if not skills_root.exists():
+                return ToolResult(output="(no skills/ directory in workspace)")
+            rows = []
+            for d in sorted(skills_root.iterdir(), key=lambda x: x.name.lower()):
+                if not d.is_dir() or d.name.startswith("_"):
+                    continue
+                sm = d / "SKILL.md"
+                if not sm.exists():
+                    continue
+                try:
+                    meta, _ = _parse_frontmatter(sm.read_text(encoding="utf-8", errors="replace"))
+                    desc = meta.get("description", "")[:120]
+                except Exception:
+                    desc = ""
+                rows.append(f"  {d.name:24s}  {desc}")
+            return ToolResult(output="Installed skills:\n" + ("\n".join(rows) if rows else "(none)"))
+
+        # ---- need a name for load/read ----
+        if not name:
+            return ToolResult(ok=False, error="name is required for load/read modes (or use mode='list')", output="")
+
+        skill_dir = skills_root / name
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.exists():
+            available = []
+            if skills_root.exists():
+                available = sorted([d.name for d in skills_root.iterdir() if d.is_dir() and (d / "SKILL.md").exists() and not d.name.startswith("_")])
+            return ToolResult(
+                ok=False,
+                error=f"skill '{name}' not found at {skill_md}",
+                output=f"Available skills: {available}" if available else "(no skills installed)",
+            )
+
+        # ---- read mode: a specific file inside the skill ----
+        if mode == "read":
+            rel = args.get("file", "")
+            if not rel:
+                return ToolResult(ok=False, error="file is required for mode='read' (e.g. 'briefs/report.md')", output="")
+            # Sandbox to the skill dir
+            target = (skill_dir / rel).resolve()
+            try:
+                target.relative_to(skill_dir.resolve())
+            except ValueError:
+                return ToolResult(ok=False, error=f"file path '{rel}' escapes skill dir", output="")
+            if not target.exists() or not target.is_file():
+                return ToolResult(ok=False, error=f"not found: {rel}", output="")
+            text = target.read_text(encoding="utf-8", errors="replace")
+            if len(text) > 20_000:
+                text = text[:20_000] + f"\n\n...[truncated at 20,000 chars; file is {len(text)} total]"
+            return ToolResult(output=f"# {name}/{rel}\n\n{text}")
+
+        # ---- load mode (default): SKILL.md + subdirs/files listing ----
+        content = skill_md.read_text(encoding="utf-8", errors="replace")
+        subdirs = sorted([d.name for d in skill_dir.iterdir() if d.is_dir()])
+        files = sorted([f.name for f in skill_dir.iterdir() if f.is_file() and f.name != "SKILL.md"])
+        # If subdirs have files, list them too so the agent knows what to Read
+        sub_details = []
+        for sd in subdirs:
+            try:
+                files_in = sorted([f.name for f in (skill_dir / sd).iterdir() if f.is_file()])
+                if files_in:
+                    sub_details.append(f"  {sd}/: {files_in}")
+            except PermissionError:
+                pass
+        header = f"# Skill: {name}\nSubdirs: {subdirs}\nOther files: {files}\n"
+        if sub_details:
+            header += "Drill-down:\n" + "\n".join(sub_details) + "\n"
+        header += "\n---\n\n"
+        return ToolResult(output=header + content)
+
+    return await asyncio.to_thread(_run)
 
 
 async def _tool_task(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -569,18 +650,23 @@ TOOLS: dict[str, ToolSpec] = {
     "Skill": ToolSpec(
         name="Skill",
         description=(
-            "Load a SKILL.md package from the workspace's skills/ directory. "
+            "Discover and load modular SKILL.md packages from workspace/skills/. "
             "Skills teach you how to do things you couldn't before (e.g., 'pdf', "
-            "'charts', 'image-generation'). Pass the skill name; returns the "
-            "SKILL.md content plus the list of subdirs (briefs, configs, scripts, "
-            "references) you can drill into with Read."
+            "'charts', 'image-generation', 'web-search').\n\n"
+            "Modes:\n"
+            "  - mode='list'                  → list all installed skills + their descriptions\n"
+            "  - mode='load'  name='X'        → read SKILL.md for skill X + list its subdirs/files\n"
+            "  - mode='read'  name='X' file='briefs/y.md'  → read a specific file inside the skill\n\n"
+            "Always call mode='list' first if you don't know what skills exist."
         ),
         json_schema={
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Skill name, e.g. 'pdf' or 'charts'."},
+                "mode": {"type": "string", "enum": ["list", "load", "read"], "default": "load"},
+                "name": {"type": "string", "description": "Skill name (required for load/read)."},
+                "file": {"type": "string", "description": "Path inside the skill (for mode='read'), e.g. 'briefs/report.md'."},
             },
-            "required": ["name"],
+            "required": [],
         },
         run=_tool_skill,
     ),

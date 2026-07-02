@@ -85,6 +85,11 @@ export function OnboardingScreen({ onDone }: { onDone: () => void }) {
   return (
     <View style={styles.container}>
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
+        <View style={styles.logoWrap}>
+          <View style={styles.logo}>
+            <Text style={styles.logoText}>P</Text>
+          </View>
+        </View>
         <Text style={styles.title}>PocketAgent</Text>
         <Text style={styles.subtitle}>Your AI agent, with its own computer, on your phone.</Text>
 
@@ -228,6 +233,9 @@ export function OnboardingScreen({ onDone }: { onDone: () => void }) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bg },
   scroll: { padding: spacing.xl, paddingTop: spacing.xxl * 2 },
+  logoWrap: { alignItems: 'center', marginBottom: spacing.lg },
+  logo: { width: 80, height: 80, borderRadius: 20, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
+  logoText: { color: '#fff', fontFamily: typography.sans, fontSize: 44, fontWeight: '800' },
   title: { color: colors.text, fontFamily: typography.sans, fontSize: typography.size.xxl, fontWeight: '700', textAlign: 'center' },
   subtitle: { color: colors.textSecondary, fontFamily: typography.sans, fontSize: typography.size.md, textAlign: 'center', marginTop: spacing.sm, marginBottom: spacing.xl },
   progress: { flexDirection: 'row', justifyContent: 'center', gap: spacing.sm, marginBottom: spacing.xl },

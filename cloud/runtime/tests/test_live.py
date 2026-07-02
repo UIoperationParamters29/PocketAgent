@@ -70,55 +70,34 @@ async def main():
             print("[ok] missing api_key rejected:", reply["message"])
 
         # 5. Full mocked session: Bash tool
-        from openai.types.chat import ChatCompletionChunk
-        from openai.types.chat.chat_completion_chunk import Choice, ChoiceDelta, ChoiceDeltaToolCall
+        from app.llm import StreamEvent
+        import json as _json
 
-        class FakeStream:
-            def __init__(self, items): self._items = items
-            def __aiter__(self): self._i = 0; return self
-            async def __anext__(self):
-                if self._i >= len(self._items): raise StopAsyncIteration
-                v = self._items[self._i]; self._i += 1; return v
-
-        # A fake client that supports a "mode" that toggles between bash and ask_user
-        class FakeClient:
-            class chat:
-                class completions:
-                    @staticmethod
-                    async def create(*, model, messages, tools, tool_choice, stream):
-                        # AskUserQuestion mode: first call asks, second call (after answer) responds
-                        if any("ask_user" in (m.get("content") or "").lower() for m in messages if m.get("role") == "user"):
-                            if not any(m.get("role") == "tool" for m in messages):
-                                return FakeStream([ChatCompletionChunk(
-                                    id="a1", created=0, model=model, object="chat.completion.chunk",
-                                    choices=[Choice(index=0, finish_reason="tool_calls", delta=ChoiceDelta(
-                                        tool_calls=[ChoiceDeltaToolCall(index=0, id="a1", type="function",
-                                            function={"name": "AskUserQuestion", "arguments": json.dumps({
-                                                "questions": [{"question": "Tone?", "header": "Tone", "type": "single",
-                                                    "options": [{"label": "Casual", "description": "x"}, {"label": "Formal", "description": "y"}]}]
-                                            })})]
-                                    ))]
-                                )])
-                            return FakeStream([ChatCompletionChunk(
-                                id="a2", created=0, model=model, object="chat.completion.chunk",
-                                choices=[Choice(index=0, finish_reason="stop", delta=ChoiceDelta(content="Got it, going casual."))]
-                            )])
-                        # Default bash mode
-                        if not any(m.get("role") == "tool" for m in messages):
-                            return FakeStream([ChatCompletionChunk(
-                                id="f1", created=0, model=model, object="chat.completion.chunk",
-                                choices=[Choice(index=0, finish_reason="tool_calls", delta=ChoiceDelta(
-                                    tool_calls=[ChoiceDeltaToolCall(index=0, id="c1", type="function",
-                                        function={"name": "Bash", "arguments": json.dumps({"command": "echo hello-from-bash"})})]
-                                ))]
-                            )])
-                        return FakeStream([ChatCompletionChunk(
-                            id="f2", created=0, model=model, object="chat.completion.chunk",
-                            choices=[Choice(index=0, finish_reason="stop", delta=ChoiceDelta(content="All done!"))]
-                        )])
+        async def fake_stream(*, messages, tools, **kw):
+            # AskUserQuestion mode
+            if any("ask_user" in (m.get("content") or "").lower() for m in messages if m.get("role") == "user"):
+                if not any(m.get("role") == "tool" for m in messages):
+                    yield StreamEvent(kind="tool_call_start", tool_index=0, tool_id="a1", tool_name="AskUserQuestion")
+                    yield StreamEvent(kind="tool_call_delta", tool_index=0,
+                                      tool_args_delta=_json.dumps({"questions": [{"question": "Tone?", "header": "Tone", "type": "single",
+                                          "options": [{"label": "Casual", "description": "x"}, {"label": "Formal", "description": "y"}]}]}))
+                    yield StreamEvent(kind="done", finish_reason="tool_calls")
+                    return
+                yield StreamEvent(kind="delta", text="Got it, going casual.")
+                yield StreamEvent(kind="done", finish_reason="stop")
+                return
+            # Default bash mode
+            if not any(m.get("role") == "tool" for m in messages):
+                yield StreamEvent(kind="tool_call_start", tool_index=0, tool_id="c1", tool_name="Bash")
+                yield StreamEvent(kind="tool_call_delta", tool_index=0,
+                                  tool_args_delta=_json.dumps({"command": "echo hello-from-bash"}))
+                yield StreamEvent(kind="done", finish_reason="tool_calls")
+                return
+            yield StreamEvent(kind="delta", text="All done!")
+            yield StreamEvent(kind="done", finish_reason="stop")
 
         import app.agent as agent_mod
-        agent_mod._client = lambda s: FakeClient()
+        agent_mod._stream_for_session = lambda s, m, t: fake_stream(messages=m, tools=t)
 
         # 5a. Bash session
         async with websockets.connect(f"ws://{settings.host}:{settings.port}/agent") as ws:

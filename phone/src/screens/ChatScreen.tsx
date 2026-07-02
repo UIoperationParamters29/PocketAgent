@@ -168,10 +168,18 @@ export function ChatScreen() {
         onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: false })}
         ListEmptyComponent={
           <View style={styles.empty}>
+            <View style={styles.emptyLogo}>
+              <Text style={styles.emptyLogoText}>P</Text>
+            </View>
             <Text style={styles.emptyTitle}>Your agent is ready</Text>
             <Text style={styles.emptyDesc}>
               Tell it what you need. It has its own Linux computer — it can run scripts, install tools, read & write files, and ship deliverables to download/.
             </Text>
+            <View style={styles.emptyHints}>
+              <Text style={styles.emptyHint}>·  Try: "make a bar chart of my sales"</Text>
+              <Text style={styles.emptyHint}>·  Try: "search the web for X"</Text>
+              <Text style={styles.emptyHint}>·  Try: "generate an image of Y"</Text>
+            </View>
           </View>
         }
       />
@@ -208,8 +216,12 @@ const styles = StyleSheet.create({
   wakeBtnText: { color: '#fff', fontFamily: typography.sans, fontSize: typography.size.sm, fontWeight: '600' },
   chatList: { padding: spacing.md, paddingTop: spacing.sm },
   empty: { padding: spacing.xl, alignItems: 'center', gap: spacing.sm, marginTop: spacing.xl * 2 },
+  emptyLogo: { width: 64, height: 64, borderRadius: 32, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center', marginBottom: spacing.md },
+  emptyLogoText: { color: '#fff', fontFamily: typography.sans, fontSize: 32, fontWeight: '800' },
   emptyTitle: { color: colors.text, fontFamily: typography.sans, fontSize: typography.size.lg, fontWeight: '600' },
   emptyDesc: { color: colors.textSecondary, fontFamily: typography.sans, fontSize: typography.size.sm, lineHeight: 20, textAlign: 'center', maxWidth: 300 },
+  emptyHints: { marginTop: spacing.lg, gap: spacing.xs, alignSelf: 'stretch' },
+  emptyHint: { color: colors.textTertiary, fontFamily: typography.mono, fontSize: typography.size.xs, textAlign: 'center' },
   questionOverlay: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm, backgroundColor: colors.bg, borderTopWidth: 1, borderTopColor: colors.border },
   sideCards: { paddingHorizontal: spacing.md, paddingVertical: spacing.xs, gap: spacing.xs },
 });

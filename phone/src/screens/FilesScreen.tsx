@@ -147,13 +147,18 @@ export function FilesScreen() {
               }
             }}
           >
-            <Text style={styles.rowIcon}>{item.type === 'dir' ? '📁' : '📄'}</Text>
+            <View style={[styles.rowIconWrap, { backgroundColor: item.type === 'dir' ? colors.accentSoft : colors.surfaceAlt }]}>
+              <Text style={[styles.rowIcon, { color: item.type === 'dir' ? colors.accent : colors.textSecondary }]}>
+                {item.type === 'dir' ? '📁' : fileIcon(item.name)}
+              </Text>
+            </View>
             <View style={styles.rowText}>
               <Text style={styles.rowName}>{item.name}</Text>
               {item.type === 'file' && item.size != null && (
                 <Text style={styles.rowMeta}>{formatBytes(item.size)}</Text>
               )}
             </View>
+            <Text style={styles.rowChevron}>{item.type === 'dir' ? '›' : '▸'}</Text>
           </TouchableOpacity>
         )}
         ListEmptyComponent={
@@ -171,6 +176,21 @@ function formatBytes(b: number): string {
   return `${(b / 1024 / 1024).toFixed(1)}MB`;
 }
 
+function fileIcon(name: string): string {
+  const ext = name.split('.').pop()?.toLowerCase() || '';
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) return '🖼️';
+  if (['pdf'].includes(ext)) return '📕';
+  if (['docx', 'doc'].includes(ext)) return '📘';
+  if (['xlsx', 'xls', 'csv'].includes(ext)) return '📗';
+  if (['pptx', 'ppt'].includes(ext)) return '📙';
+  if (['py'].includes(ext)) return '🐍';
+  if (['js', 'ts', 'tsx', 'jsx'].includes(ext)) return '📜';
+  if (['md', 'txt'].includes(ext)) return '📝';
+  if (['json', 'yaml', 'yml', 'toml'].includes(ext)) return '⚙️';
+  if (['zip', 'tar', 'gz', 'rar'].includes(ext)) return '🗜️';
+  return '📄';
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.bg },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.md, paddingTop: spacing.xl + spacing.sm, paddingBottom: spacing.sm },
@@ -182,10 +202,12 @@ const styles = StyleSheet.create({
   crumbSep: { color: colors.textTertiary, fontFamily: typography.mono, fontSize: typography.size.sm },
   list: { padding: spacing.md },
   row: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingVertical: spacing.md, paddingHorizontal: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.borderSubtle },
-  rowIcon: { fontSize: 18 },
+  rowIconWrap: { width: 36, height: 36, borderRadius: radius.md, alignItems: 'center', justifyContent: 'center' },
+  rowIcon: { fontSize: 16 },
   rowText: { flex: 1 },
   rowName: { color: colors.text, fontFamily: typography.mono, fontSize: typography.size.sm },
   rowMeta: { color: colors.textTertiary, fontFamily: typography.mono, fontSize: typography.size.xs, marginTop: 2 },
+  rowChevron: { color: colors.textTertiary, fontSize: 18, fontWeight: '300' },
   empty: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.bg },
   emptyText: { color: colors.textTertiary, fontFamily: typography.sans, fontSize: typography.size.sm },
   error: { color: colors.error, fontFamily: typography.sans, fontSize: typography.size.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm },
