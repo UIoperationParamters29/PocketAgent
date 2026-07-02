@@ -1,0 +1,27 @@
+{
+  "name": "PocketAgent Cloud Runtime",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {"version": "20"},
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+  },
+  "postCreateCommand": "bash .devcontainer/bootstrap.sh",
+  "forwardPorts": [8000],
+  "portsAttributes": {
+    "8000": {
+      "label": "PocketAgent Runtime",
+      "visibility": "public",
+      "onAutoForward": "notify"
+    }
+  },
+  "remoteEnv": {
+    "PA_HOST": "0.0.0.0",
+    "PA_PORT": "8000",
+    "PA_CHANNEL_SECRET": "${localEnv:PA_CHANNEL_SECRET}"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python", "ms-python.black-formatter", "charliermarsh.ruff"]
+    }
+  }
+}

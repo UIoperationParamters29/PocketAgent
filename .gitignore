@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+.pytest_cache/
+
+# Workspace state (the agent's working files — never commit)
+workspace/
+**/workspace/
+
+# Local dev artifacts
+*.log
+.DS_Store
+
+# Secrets — never commit
+**/gh_token.txt
+**/*secret*
+upload/gh_token.txt
+
+# Phone (Phase 2)
+phone/node_modules/
+phone/.expo/
+phone/android/
+phone/ios/
+phone/*.apk
+phone/*.aab

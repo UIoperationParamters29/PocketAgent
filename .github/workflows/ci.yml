@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-runtime:
+    name: Test cloud runtime
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloud/runtime
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ripgrep (for Grep tool)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
+
+      - name: Install runtime
+        run: pip install -e .
+
+      - name: Run smoke tests
+        run: python tests/test_smoke.py
+
+      - name: Run live integration tests
+        run: python tests/test_live.py
