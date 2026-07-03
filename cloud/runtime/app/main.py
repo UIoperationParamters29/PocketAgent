@@ -38,10 +38,12 @@ from .config import settings
 async def lifespan(app: FastAPI):
     for sub in ("download", "scripts", "upload", "skills", ".pocketagent"):
         (settings.workspace_root / sub).mkdir(parents=True, exist_ok=True)
-    if not settings.channel_secret:
-        ephem = os.urandom(16).hex()
-        settings.channel_secret = ephem
-        print(f"[PocketAgent] No PA_CHANNEL_SECRET set. Ephemeral secret: {ephem}")
+    if settings.channel_secret:
+        print(f"[PocketAgent] Channel secret set ({settings.channel_secret[:8]}...) — auth required.")
+    else:
+        print("[PocketAgent] No PA_CHANNEL_SECRET set — running in OPEN mode (any connection accepted).")
+        print("  The codespace URL is unguessable, but for defense-in-depth, set PA_CHANNEL_SECRET")
+        print("  as a Codespaces secret at github.com/settings/codespaces.")
     yield
 
 
@@ -152,18 +154,22 @@ async def agent_ws(ws: WebSocket):
         {"type": "session.reset"}
     """
     # ----- Auth -----
+    # Skip auth entirely if:
+    #   - channel_secret is empty (open mode), OR
+    #   - open_mode is True (explicit override)
+    skip_auth = settings.open_mode or not settings.channel_secret
     auth = ws.headers.get("authorization", "")
     token = auth.removeprefix("Bearer ").strip() if auth else ""
     await ws.accept()
 
-    if settings.channel_secret and token != settings.channel_secret:
+    if not skip_auth and token != settings.channel_secret:
         try:
             first = await ws.receive_json()
             if first.get("type") == "session.start" and first.get("channel_secret") == settings.channel_secret:
                 token = settings.channel_secret
                 start_frame = first
             else:
-                await ws.send_json({"type": "error", "message": "bad channel_secret", "kind": "auth"})
+                await ws.send_json({"type": "error", "message": "bad channel_secret — the secret in your phone app doesn't match PA_CHANNEL_SECRET in the codespace. Stop + start the codespace if you recently changed the secret.", "kind": "auth"})
                 await ws.close(code=status.WS_1008_POLICY_VIOLATION)
                 return
         except WebSocketDisconnect:

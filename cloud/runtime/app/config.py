@@ -37,8 +37,12 @@ class Settings(BaseSettings):
     port: int = 8000
     # Shared secret for the phone<->cloud WSS channel. The phone must send this
     # in the `Authorization: Bearer <token>` header or in the first WS frame.
-    # If empty, the runtime generates an ephemeral one at startup (printed once).
+    # If empty, the runtime accepts ANY connection (open mode — relies on the
+    # unguessable codespace URL for security). Set PA_CHANNEL_SECRET for
+    # defense-in-depth.
     channel_secret: str = ""
+    # If True, skip channel secret check entirely (even if set). Useful for debugging.
+    open_mode: bool = False
 
     # --- Workspace ---
     workspace_root: Path = DEFAULT_WORKSPACE

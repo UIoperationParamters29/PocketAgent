@@ -141,8 +141,8 @@ export function useAgentSession() {
   const connect = useCallback(async () => {
     // Read connection config from secure store
     const [secret, cfg] = await Promise.all([loadChannelSecret(), loadSessionConfig()]);
-    if (!secret || !cfg) {
-      setLastError('Missing channel secret or session config — complete onboarding first.');
+    if (!cfg) {
+      setLastError('Missing session config — complete onboarding first.');
       return false;
     }
 
@@ -162,10 +162,17 @@ export function useAgentSession() {
     const wsUrl = url.replace(/^http/, 'ws') + '/agent';
     const ws = new AgentWS({
       url: wsUrl,
-      channelSecret: secret,
+      channelSecret: secret || '',  // empty = open mode (runtime accepts any)
       sessionConfig: cfg,
       onEvent: handleEvent,
-      onStatus: (s) => setConnStatus(s),
+      onStatus: (s) => {
+        setConnStatus(s);
+        // If error, also surface the WS client's last error message
+        if (s === 'error' && wsRef.current) {
+          const wsErr = wsRef.current.getLastError();
+          if (wsErr) setLastError(wsErr);
+        }
+      },
     });
     wsRef.current = ws;
     ws.connect();

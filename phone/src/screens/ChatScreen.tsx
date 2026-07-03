@@ -211,6 +211,17 @@ export function ChatScreen() {
 
       <StatusBar status={store.connStatus} codespaceState={store.codespaceState} />
 
+      {/* Error banner — shows the actual error when connection fails */}
+      {store.connStatus === 'error' && store.lastError && (
+        <TouchableOpacity
+          style={styles.errorBanner}
+          onPress={() => Alert.alert('Connection error', store.lastError + '\n\nCommon fixes:\n1. Open the codespace once at github.com/codespaces (registers the port forward)\n2. In the codespace terminal, run: curl http://localhost:8000/ — if it fails, the runtime isn\'t running. Run: bash /workspaces/PocketAgent/cloud/.devcontainer/start-runtime.sh\n3. If the channel secret doesn\'t match: clear it in Settings → Channel secret (use open mode), OR stop+start the codespace after setting the secret')}
+        >
+          <Text style={styles.errorBannerText} numberOfLines={3}>⚠️ {store.lastError}</Text>
+          <Text style={styles.errorBannerHint}>Tap for help →</Text>
+        </TouchableOpacity>
+      )}
+
       {/* Side cards (todos, outline, completion) */}
       <View style={styles.sideCards}>
         {store.todos.length > 0 && <TodoList todos={store.todos} />}
@@ -295,4 +306,7 @@ const styles = StyleSheet.create({
   emptyHint: { color: colors.textTertiary, fontFamily: typography.mono, fontSize: typography.size.xs, textAlign: 'center' },
   questionOverlay: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm, backgroundColor: colors.bg, borderTopWidth: 1, borderTopColor: colors.border },
   sideCards: { paddingHorizontal: spacing.md, paddingVertical: spacing.xs, gap: spacing.xs },
+  errorBanner: { backgroundColor: colors.errorSoft, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.error + '33' },
+  errorBannerText: { color: colors.error, fontFamily: typography.sans, fontSize: typography.size.xs, lineHeight: 16 },
+  errorBannerHint: { color: colors.accent, fontFamily: typography.mono, fontSize: 10, marginTop: 2 },
 });

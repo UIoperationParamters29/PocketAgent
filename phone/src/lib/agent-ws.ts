@@ -35,6 +35,7 @@ export class AgentWS {
   private closed = false;
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
   private status: ConnStatus = 'disconnected';
+  private lastError: string | null = null;
 
   constructor(opts: AgentWSOptions) {
     this.opts = opts;
@@ -75,20 +76,45 @@ export class AgentWS {
           this.setStatus('connected');
           this.reconnectAttempts = 0;
         }
+        // If the server sends an auth error, DON'T reconnect — it'll just fail again.
+        // Surface the error and stop.
+        if (evt.type === 'error' && (evt as any).kind === 'auth') {
+          this.lastError = (evt as any).message || 'Authentication failed';
+          this.closed = true;  // prevent reconnect
+          this.opts.onEvent(evt);
+          this.setStatus('error');
+          try { this.ws?.close(); } catch {}
+          return;
+        }
         this.opts.onEvent(evt);
       } catch (err) {
         console.warn('Failed to parse WS message:', err);
       }
     };
 
-    this.ws.onerror = () => {
+    this.ws.onerror = (e: any) => {
+      this.lastError = 'WebSocket connection error — the runtime may not be running inside the codespace. Open the codespace at github.com/codespaces, check the terminal for uvicorn errors.';
       this.setStatus('error');
     };
 
-    this.ws.onclose = () => {
+    this.ws.onclose = (e: CloseEvent) => {
       if (this.keepaliveTimer) {
         clearInterval(this.keepaliveTimer);
         this.keepaliveTimer = null;
+      }
+      // 1008 = policy violation (auth failure) — don't reconnect
+      if (e.code === 1008) {
+        this.closed = true;
+        this.lastError = 'Authentication failed — channel secret mismatch. Stop + start the codespace, or clear the channel secret in Settings to use open mode.';
+        this.setStatus('error');
+        return;
+      }
+      // 1006 = abnormal closure (server not running) — retry a few times then give up
+      if (e.code === 1006 && this.reconnectAttempts >= 5) {
+        this.closed = true;
+        this.lastError = 'Runtime not reachable after 5 attempts. The codespace may need to be opened in a browser first, or the runtime inside it may have crashed. Open the codespace at github.com/codespaces and check the terminal.';
+        this.setStatus('error');
+        return;
       }
       if (!this.closed) {
         this.scheduleReconnect();
@@ -101,11 +127,15 @@ export class AgentWS {
   private scheduleReconnect() {
     if (this.closed) return;
     this.reconnectAttempts++;
-    const delay = Math.min(1000 * 2 ** this.reconnectAttempts, 30_000);
+    const delay = Math.min(1000 * 2 ** this.reconnectAttempts, 15_000);
     this.setStatus('reconnecting');
     setTimeout(() => {
       if (!this.closed) this.connect();
     }, delay);
+  }
+
+  getLastError(): string | null {
+    return this.lastError;
   }
 
   send(frame: OutgoingFrame) {
