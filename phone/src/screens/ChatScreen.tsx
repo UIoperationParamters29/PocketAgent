@@ -1,20 +1,16 @@
 /**
  * ChatScreen — the main PocketAgent UI.
  *
- * Top bar: codespace wake/sleep control + connection status.
- * Middle: chat history (FlatList, inverted-ish for chat UX).
- * Bottom: ChatInput.
+ * Architecture v0.5: the agent runtime runs in Termux ON THE PHONE.
+ * The APK is a thin UI that connects to ws://127.0.0.1:8080/agent.
+ * No codespaces, no cloud, no CC, no egress issues.
  *
- * Side cards render inline in the message stream:
- *   - TodoList (sticky above chat)
- *   - QuestionCard (when pendingQuestion is set)
- *   - OutlineCard (when outline is set)
- *   - CompleteCard (when completion is set)
+ * If the runtime isn't running, show setup instructions.
  */
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
-  View, Text, FlatList, TouchableOpacity, StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator, Alert,
+  View, Text, FlatList, TouchableOpacity, StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, Linking,
 } from 'react-native';
 import { colors, spacing, radius, typography } from '../theme/colors';
 import { useStore } from '../state/store';
@@ -23,16 +19,16 @@ import {
   MessageBubble, ChatInput, TodoList, QuestionCard, OutlineCard, CompleteCard, StatusBar,
 } from '../components';
 import { ChatMessage } from '../lib/types';
-import {
-  loadGithubPat, loadCodespaceName, saveCodespaceName,
-} from '../lib/secure-store';
-import { getCodespace, startCodespace, stopCodespace, waitUntilAvailable, listCodespaces, createCodespace, fetchTunnelUrl } from '../lib/codespaces';
+import { loadSessionConfig } from '../lib/secure-store';
+
+const RUNTIME_URL = 'http://127.0.0.1:8080';
 
 export function ChatScreen() {
   const store = useStore();
   const session = useAgentSession();
   const flatListRef = useRef<FlatList<ChatMessage>>(null);
-  const [waking, setWaking] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [runtimeUp, setRuntimeUp] = useState<boolean | null>(null);
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
@@ -41,152 +37,43 @@ export function ChatScreen() {
     }
   }, [store.messages.length, store.streamingText]);
 
-  const wakeCodespace = useCallback(async () => {
-    if (waking) return;
-    setWaking(true);
-    store.setConnStatus('waking-codespace');
+  // Check if the Termux runtime is running
+  const checkRuntime = useCallback(async () => {
+    setChecking(true);
     try {
-      const pat = await loadGithubPat();
-      if (!pat || !pat.trim()) {
-        Alert.alert(
-          'No GitHub PAT',
-          'Go to Settings → GitHub PAT and paste a Personal Access Token with the repo, codespace, workflow scopes.',
-          [{ text: 'OK' }]
-        );
-        return;
-      }
-
-      let name = await loadCodespaceName();
-      if (!name) {
-        // List codespaces; if any exist, use the first PocketAgent one (or the first overall)
-        let list;
-        try {
-          list = await listCodespaces(pat);
-        } catch (e: any) {
-          Alert.alert(
-            'GitHub API error',
-            `Couldn't list your codespaces: ${e.message}\n\nCheck that your PAT has the 'codespace' scope.`,
-            [{ text: 'OK' }]
-          );
-          return;
-        }
-        if (list.length === 0) {
-          // No codespace exists — offer to create one
-          Alert.alert(
-            'No codespace yet',
-            'You don\'t have any codespaces. PocketAgent can create one for you from the PocketAgent repo.',
-            [
-              { text: 'Cancel', style: 'cancel' },
-              { text: 'Create it', onPress: async () => {
-                try {
-                  store.setCodespace('Provisioning', null, null);
-                  const cs = await createCodespace(pat, 'UIoperationParamters29/PocketAgent');
-                  await saveCodespaceName(cs.name);
-                  store.setCodespace(cs.state, cs.name, null);
-                  // Continue with the wake flow
-                  setTimeout(() => wakeCodespace(), 500);
-                } catch (e: any) {
-                  Alert.alert('Create failed', e.message);
-                  store.setConnStatus('error');
-                }
-              }},
-            ]
-          );
-          return;
-        }
-        name = list[0].name;
-        await saveCodespaceName(name);
-      }
-      store.setCodespace(null, name, null);
-
-      // Check state; start if stopped
-      let status;
-      try {
-        status = await getCodespace(pat, name);
-      } catch (e: any) {
-        Alert.alert(
-          'Codespace not found',
-          `Couldn't find codespace "${name}": ${e.message}\n\nGo to Settings → Codespace name and clear it to re-detect, or create a new one on github.com/codespaces.`,
-          [{ text: 'OK' }]
-        );
-        return;
-      }
-      store.setCodespace(status.state, name, null);
-      if (status.state !== 'Available') {
-        try {
-          await startCodespace(pat, name);
-        } catch (e: any) {
-          Alert.alert('Start failed', `Couldn't start codespace: ${e.message}`);
-          return;
+      const r = await fetch(`${RUNTIME_URL}/`, { method: 'GET' });
+      if (r.ok) {
+        const data = await r.json();
+        if (data.name === 'PocketAgent Runtime') {
+          setRuntimeUp(true);
+          store.setCodespace('Available', 'termux', RUNTIME_URL);
+          return true;
         }
       }
-
-      store.setCodespace('Available', name, null);
-
-      // Try to fetch the tunnel URL from the runtime-status branch.
-      // The tunnel (serveo.net) lets us connect WITHOUT needing the codespace
-      // to be opened in a browser first.
-      let runtimeUrl = '';
-      try {
-        const tunnel = await fetchTunnelUrl(pat);
-        if (tunnel) {
-          runtimeUrl = tunnel;
-          console.log('Using tunnel URL:', tunnel);
-        }
-      } catch (e) {
-        // Fall through to codespace port forward
-      }
-      if (!runtimeUrl) {
-        // Fall back to codespace port-forward URL (requires browser open)
-        const result = await waitUntilAvailable(pat, name, {
-          timeoutMs: 240_000,
-          intervalMs: 3_000,
-          onPoll: (s) => store.setCodespace(s, name, null),
-        });
-        runtimeUrl = result.runtime_url;
-
-        // Wait a bit + retry tunnel fetch (postStartCommand may still be running)
-        for (let i = 0; i < 5; i++) {
-          await new Promise(r => setTimeout(r, 4000));
-          const tunnel = await fetchTunnelUrl(pat).catch(() => null);
-          if (tunnel) {
-            runtimeUrl = tunnel;
-            console.log('Got tunnel URL on retry:', tunnel);
-            break;
-          }
-        }
-      }
-      store.setCodespace('Available', name, runtimeUrl);
-
-      // Now connect the WS
-      const ok = await session.connect();
-      if (!ok) {
-        // session.connect already set the error message
-        Alert.alert(
-          'Connect failed',
-          'The runtime may not be running inside the codespace yet.\n\nFix:\n1. Open the codespace at github.com/codespaces (this triggers the runtime to start)\n2. Wait 30 seconds\n3. Tap Wake again\n\nIf it still fails, open the codespace terminal and run:\n  bash /workspaces/PocketAgent/cloud/.devcontainer/start-runtime.sh',
-          [{ text: 'OK' }]
-        );
-      }
-    } catch (e: any) {
-      Alert.alert('Wake failed', `${e.message || e}`);
-      store.setConnStatus('error');
+      setRuntimeUp(false);
+      return false;
+    } catch (e) {
+      setRuntimeUp(false);
+      return false;
     } finally {
-      setWaking(false);
+      setChecking(false);
     }
-  }, [waking, store, session]);
+  }, [store]);
 
-  const sleepCodespace = useCallback(async () => {
-    const pat = await loadGithubPat();
-    const name = await loadCodespaceName();
-    if (!pat || !name) return;
-    Alert.alert('Stop codespace?', 'The codespace will keep its 15GB of storage but stop consuming your free core-hours.', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Stop', style: 'destructive', onPress: async () => {
-        session.disconnect();
-        try { await stopCodespace(pat, name); store.setCodespace('Stopped', name, null); } catch (e: any) { Alert.alert('Stop failed', e.message); }
-      } },
-    ]);
+  // Check on mount
+  useEffect(() => {
+    checkRuntime();
+  }, [checkRuntime]);
+
+  // Connect to the runtime
+  const connect = useCallback(async () => {
+    const cfg = await loadSessionConfig();
+    if (!cfg) {
+      Alert.alert('No LLM config', 'Complete onboarding first to set your LLM provider + key.');
+      return;
+    }
+    store.setCodespace('Available', 'termux', RUNTIME_URL);
+    await session.connect();
   }, [session, store]);
 
   const onSend = useCallback((text: string) => {
@@ -201,28 +88,69 @@ export function ChatScreen() {
 
   const isConnected = store.connStatus === 'connected';
 
+  // ---- Runtime not running — show setup instructions ----
+  if (runtimeUp === false) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.topBar}>
+          <Text style={styles.brand}>PocketAgent</Text>
+        </View>
+        <View style={styles.setupContainer}>
+          <View style={styles.setupLogo}>
+            <Text style={styles.setupLogoText}>P</Text>
+          </View>
+          <Text style={styles.setupTitle}>Runtime not detected</Text>
+          <Text style={styles.setupDesc}>
+            PocketAgent needs the Termux runtime running on your phone. Setup takes 2 minutes:
+          </Text>
+
+          <View style={styles.stepsContainer}>
+            <Text style={styles.stepTitle}>1. Install Termux</Text>
+            <Text style={styles.stepDesc}>
+              Download from F-Droid (not Play Store — the Play Store version is outdated):
+            </Text>
+            <TouchableOpacity onPress={() => Linking.openURL('https://f-droid.org/packages/com.termux/')}>
+              <Text style={styles.link}>https://f-droid.org/packages/com.termux/</Text>
+            </TouchableOpacity>
+
+            <Text style={[styles.stepTitle, { marginTop: spacing.md }]}>2. Open Termux, run:</Text>
+            <View style={styles.codeBlock}>
+              <Text style={styles.codeText} selectable>pkg install python git ripgrep -y{'\n'}pip install pocketagent-runtime{'\n'}pocketagent-start</Text>
+            </View>
+
+            <Text style={[styles.stepTitle, { marginTop: spacing.md }]}>3. Come back here</Text>
+            <Text style={styles.stepDesc}>Tap "Check again" once the runtime is running.</Text>
+          </View>
+
+          <TouchableOpacity
+            style={styles.checkBtn}
+            onPress={checkRuntime}
+            disabled={checking}
+            activeOpacity={0.7}
+          >
+            {checking ? <ActivityIndicator color="#fff" /> : <Text style={styles.checkBtnText}>Check again</Text>}
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
+  // ---- Runtime is up — show the chat ----
   return (
     <KeyboardAvoidingView
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      {/* Top bar */}
       <View style={styles.topBar}>
         <Text style={styles.brand}>PocketAgent</Text>
         <View style={styles.topActions}>
-          {store.codespaceName ? (
-            <TouchableOpacity style={styles.csBadge} onPress={isConnected ? sleepCodespace : wakeCodespace} disabled={waking}>
-              {waking ? (
-                <ActivityIndicator size="small" color={colors.warning} />
-              ) : (
-                <View style={[styles.csDot, { backgroundColor: isConnected ? colors.success : colors.warning }]} />
-              )}
-              <Text style={styles.csBadgeText}>{store.codespaceState || '—'}</Text>
-            </TouchableOpacity>
-          ) : null}
-          {!isConnected && !waking && (
-            <TouchableOpacity style={styles.wakeBtn} onPress={wakeCodespace}>
-              <Text style={styles.wakeBtnText}>Wake</Text>
+          <View style={styles.csBadge}>
+            <View style={[styles.csDot, { backgroundColor: isConnected ? colors.success : (runtimeUp ? colors.warning : colors.textTertiary) }]} />
+            <Text style={styles.csBadgeText}>{runtimeUp ? (isConnected ? 'connected' : 'runtime up') : 'no runtime'}</Text>
+          </View>
+          {!isConnected && runtimeUp && (
+            <TouchableOpacity style={styles.wakeBtn} onPress={connect}>
+              <Text style={styles.wakeBtnText}>Connect</Text>
             </TouchableOpacity>
           )}
         </View>
@@ -230,36 +158,27 @@ export function ChatScreen() {
 
       <StatusBar status={store.connStatus} codespaceState={store.codespaceState} />
 
-      {/* Error banner — shows the actual error when connection fails */}
       {store.connStatus === 'error' && store.lastError && (
         <TouchableOpacity
           style={styles.errorBanner}
-          onPress={() => Alert.alert('Connection error', store.lastError + '\n\nCommon fixes:\n1. Open the codespace once at github.com/codespaces (registers the port forward)\n2. In the codespace terminal, run: curl http://localhost:8000/ — if it fails, the runtime isn\'t running. Run: bash /workspaces/PocketAgent/cloud/.devcontainer/start-runtime.sh\n3. If the channel secret doesn\'t match: clear it in Settings → Channel secret (use open mode), OR stop+start the codespace after setting the secret')}
+          onPress={() => Alert.alert('Connection error', store.lastError + '\n\nMake sure Termux is running: pocketagent-start')}
         >
           <Text style={styles.errorBannerText} numberOfLines={3}>⚠️ {store.lastError}</Text>
           <Text style={styles.errorBannerHint}>Tap for help →</Text>
         </TouchableOpacity>
       )}
 
-      {/* Side cards (todos, outline, completion) */}
+      {/* Side cards */}
       <View style={styles.sideCards}>
         {store.todos.length > 0 && <TodoList todos={store.todos} />}
         {store.outline && (
-          <OutlineCard
-            documentType={store.outline.document_type}
-            sections={store.outline.sections}
-            design={store.outline.design}
-          />
+          <OutlineCard documentType={store.outline.document_type} sections={store.outline.sections} design={store.outline.design} />
         )}
         {store.completion && (
-          <CompleteCard
-            projectType={store.completion.project_type}
-            summary={store.completion.summary}
-          />
+          <CompleteCard projectType={store.completion.project_type} summary={store.completion.summary} />
         )}
       </View>
 
-      {/* Chat history */}
       <FlatList
         ref={flatListRef}
         data={store.messages}
@@ -274,32 +193,27 @@ export function ChatScreen() {
             </View>
             <Text style={styles.emptyTitle}>Your agent is ready</Text>
             <Text style={styles.emptyDesc}>
-              Tell it what you need. It has its own Linux computer — it can run scripts, install tools, read & write files, and ship deliverables to download/.
+              Tell it what you need. It has its own Linux computer (Termux) — it can run scripts, install tools, read & write files, and ship deliverables.
             </Text>
             <View style={styles.emptyHints}>
               <Text style={styles.emptyHint}>·  Try: "make a bar chart of my sales"</Text>
-              <Text style={styles.emptyHint}>·  Try: "search the web for X"</Text>
-              <Text style={styles.emptyHint}>·  Try: "generate an image of Y"</Text>
+              <Text style={styles.emptyHint}>·  Try: "list what's in my workspace"</Text>
+              <Text style={styles.emptyHint}>·  Try: "write a Python script that..."</Text>
             </View>
           </View>
         }
       />
 
-      {/* Pending question */}
       {store.pendingQuestion && (
         <View style={styles.questionOverlay}>
-          <QuestionCard
-            questions={store.pendingQuestion.questions}
-            onAnswer={onAnswer}
-          />
+          <QuestionCard questions={store.pendingQuestion.questions} onAnswer={onAnswer} />
         </View>
       )}
 
-      {/* Input */}
       <ChatInput
         onSend={onSend}
         disabled={!isConnected || store.isAgentBusy || !!store.pendingQuestion}
-        placeholder={isConnected ? (store.isAgentBusy ? 'Agent is working…' : 'Message your agent…') : 'Wake the codespace first'}
+        placeholder={isConnected ? (store.isAgentBusy ? 'Agent is working…' : 'Message your agent…') : 'Tap Connect first'}
       />
     </KeyboardAvoidingView>
   );
@@ -328,4 +242,19 @@ const styles = StyleSheet.create({
   errorBanner: { backgroundColor: colors.errorSoft, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderBottomWidth: 1, borderBottomColor: colors.error + '33' },
   errorBannerText: { color: colors.error, fontFamily: typography.sans, fontSize: typography.size.xs, lineHeight: 16 },
   errorBannerHint: { color: colors.accent, fontFamily: typography.mono, fontSize: 10, marginTop: 2 },
+
+  // Setup screen
+  setupContainer: { flex: 1, padding: spacing.xl, alignItems: 'center' },
+  setupLogo: { width: 80, height: 80, borderRadius: 20, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center', marginBottom: spacing.lg, marginTop: spacing.xl },
+  setupLogoText: { color: '#fff', fontFamily: typography.sans, fontSize: 44, fontWeight: '800' },
+  setupTitle: { color: colors.text, fontFamily: typography.sans, fontSize: typography.size.xl, fontWeight: '700', marginBottom: spacing.sm },
+  setupDesc: { color: colors.textSecondary, fontFamily: typography.sans, fontSize: typography.size.sm, lineHeight: 20, textAlign: 'center', marginBottom: spacing.xl },
+  stepsContainer: { width: '100%', backgroundColor: colors.surface, borderRadius: radius.lg, padding: spacing.lg, borderWidth: 1, borderColor: colors.border },
+  stepTitle: { color: colors.text, fontFamily: typography.sans, fontSize: typography.size.md, fontWeight: '600', marginBottom: spacing.xs },
+  stepDesc: { color: colors.textSecondary, fontFamily: typography.sans, fontSize: typography.size.sm, lineHeight: 18, marginBottom: spacing.xs },
+  link: { color: colors.accent, fontFamily: typography.mono, fontSize: typography.size.xs, marginBottom: spacing.sm },
+  codeBlock: { backgroundColor: colors.bg, borderRadius: radius.md, padding: spacing.md, marginTop: spacing.xs, borderWidth: 1, borderColor: colors.border },
+  codeText: { color: colors.accent, fontFamily: typography.mono, fontSize: typography.size.xs, lineHeight: 20 },
+  checkBtn: { backgroundColor: colors.accent, borderRadius: radius.md, paddingVertical: spacing.md, alignItems: 'center', marginTop: spacing.xl, width: '100%' },
+  checkBtnText: { color: '#fff', fontFamily: typography.sans, fontSize: typography.size.md, fontWeight: '600' },
 });

@@ -1,0 +1,30 @@
+[project]
+name = "pocketagent-runtime"
+version = "0.5.0"
+description = "PocketAgent runtime — the agent's own Linux computer. Runs inside Termux on your phone."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110,<1.0",
+    "uvicorn[standard]>=0.27,<1.0",
+    "websockets>=12,<17",
+    "pydantic>=2.5,<3",
+    "openai>=1.50,<2",
+    "httpx>=0.27,<1.0",
+    "anyio>=4,<5",
+    "ripgrepy>=2.2,<3",
+    "python-multipart>=0.0.9,<1.0",
+]
+
+[project.scripts]
+pocketagent-start = "pocketagent.cli:start"
+pocketagent-stop = "pocketagent.cli:stop"
+pocketagent-status = "pocketagent.cli:status"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pocketagent*"]
