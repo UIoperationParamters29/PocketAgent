@@ -26,7 +26,7 @@ import { ChatMessage } from '../lib/types';
 import {
   loadGithubPat, loadCodespaceName, saveCodespaceName,
 } from '../lib/secure-store';
-import { getCodespace, startCodespace, stopCodespace, waitUntilAvailable, listCodespaces, createCodespace } from '../lib/codespaces';
+import { getCodespace, startCodespace, stopCodespace, waitUntilAvailable, listCodespaces, createCodespace, fetchTunnelUrl } from '../lib/codespaces';
 
 export function ChatScreen() {
   const store = useStore();
@@ -121,23 +121,42 @@ export function ChatScreen() {
         }
       }
 
-      // Wait for Available + derive runtime URL
-      let result;
+      store.setCodespace('Available', name, null);
+
+      // Try to fetch the tunnel URL from the runtime-status branch.
+      // The tunnel (serveo.net) lets us connect WITHOUT needing the codespace
+      // to be opened in a browser first.
+      let runtimeUrl = '';
       try {
-        result = await waitUntilAvailable(pat, name, {
+        const tunnel = await fetchTunnelUrl(pat);
+        if (tunnel) {
+          runtimeUrl = tunnel;
+          console.log('Using tunnel URL:', tunnel);
+        }
+      } catch (e) {
+        // Fall through to codespace port forward
+      }
+      if (!runtimeUrl) {
+        // Fall back to codespace port-forward URL (requires browser open)
+        const result = await waitUntilAvailable(pat, name, {
           timeoutMs: 240_000,
           intervalMs: 3_000,
           onPoll: (s) => store.setCodespace(s, name, null),
         });
-      } catch (e: any) {
-        Alert.alert(
-          'Codespace timeout',
-          `Codespace didn't become Available in time: ${e.message}\n\nIt may still be provisioning. Try Wake again in a minute, or open it once at github.com/codespaces to speed things up.`,
-          [{ text: 'OK' }]
-        );
-        return;
+        runtimeUrl = result.runtime_url;
+
+        // Wait a bit + retry tunnel fetch (postStartCommand may still be running)
+        for (let i = 0; i < 5; i++) {
+          await new Promise(r => setTimeout(r, 4000));
+          const tunnel = await fetchTunnelUrl(pat).catch(() => null);
+          if (tunnel) {
+            runtimeUrl = tunnel;
+            console.log('Got tunnel URL on retry:', tunnel);
+            break;
+          }
+        }
       }
-      store.setCodespace('Available', name, result.runtime_url);
+      store.setCodespace('Available', name, runtimeUrl);
 
       // Now connect the WS
       const ok = await session.connect();
@@ -145,7 +164,7 @@ export function ChatScreen() {
         // session.connect already set the error message
         Alert.alert(
           'Connect failed',
-          'Codespace is up but the WebSocket connection failed. Make sure:\n• The codespace was opened in a browser at least once (to register the port forward)\n• PA_CHANNEL_SECRET matches between the app and your Codespaces secrets\n• The runtime is running inside the codespace (open the codespace, check the terminal)',
+          'The runtime may not be running inside the codespace yet.\n\nFix:\n1. Open the codespace at github.com/codespaces (this triggers the runtime to start)\n2. Wait 30 seconds\n3. Tap Wake again\n\nIf it still fails, open the codespace terminal and run:\n  bash /workspaces/PocketAgent/cloud/.devcontainer/start-runtime.sh',
           [{ text: 'OK' }]
         );
       }

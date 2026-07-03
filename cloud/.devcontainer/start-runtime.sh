@@ -1,27 +1,30 @@
 #!/usr/bin/env bash
-# PocketAgent runtime auto-start — runs on EVERY codespace start (postStartCommand).
-# Idempotent: kills any existing uvicorn, then starts fresh.
+# PocketAgent runtime auto-start with public tunnel.
 #
-# Also writes a status file to a git branch so external monitoring (the phone app
-# or our CI) can verify the runtime is alive without needing to SSH in.
+# Problem: GitHub Codespaces' public port URL only works AFTER the codespace
+# is opened in a browser (which registers the port forward). This makes it
+# impossible to connect from the phone app without first opening the codespace.
+#
+# Solution: Use a tunneling service (serveo.net — free, no account, no install)
+# that exposes port 8000 on a public URL the runtime controls. The phone app
+# connects to that URL instead of the codespace's port-forward URL.
+#
+# If serveo is down, fall back to the codespace port forward (requires browser open).
 set -uo pipefail
 
-cd /workspaces/PocketAgent/cloud/runtime 2>/dev/null || {
-  echo "[PocketAgent] ERROR: /workspaces/PocketAgent/cloud/runtime not found"
-  exit 1
-}
+cd /workspaces/PocketAgent/cloud/runtime 2>/dev/null || exit 1
 
-# Make sure deps are installed (idempotent — bootstrap.sh already ran on create)
+# Install deps if needed
 if ! python -c "import fastapi" 2>/dev/null; then
-  echo "[PocketAgent] Installing runtime deps..."
   pip install -e . -q 2>&1 | tail -3
 fi
 
-# Kill any existing uvicorn on port 8000
+# Kill existing uvicorn + ssh tunnel
 pkill -f "python.*-m.*uvicorn.*app.main" 2>/dev/null || true
+pkill -f "ssh.*-R.*80:localhost:8000.*serveo" 2>/dev/null || true
 sleep 1
 
-# Resolve the channel secret
+# Resolve channel secret
 SECRET_FILE="$HOME/.pocketagent-secret"
 if [ -z "${PA_CHANNEL_SECRET:-}" ]; then
   if [ -f "$SECRET_FILE" ]; then
@@ -31,63 +34,77 @@ if [ -z "${PA_CHANNEL_SECRET:-}" ]; then
     echo "$EPHEM" > "$SECRET_FILE"
     chmod 600 "$SECRET_FILE"
     export PA_CHANNEL_SECRET="$EPHEM"
-    echo "[PocketAgent] Generated persistent channel secret: $EPHEM"
+    echo "[PocketAgent] Channel secret: $EPHEM"
   fi
 fi
 
-# Start uvicorn detached
+# Start uvicorn
 setsid nohup python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > /tmp/pocketagent.log 2>&1 < /dev/null &
 UVICORN_PID=$!
 disown $UVICORN_PID 2>/dev/null || true
-echo "[PocketAgent] Runtime started: PID $UVICORN_PID"
+echo "[PocketAgent] uvicorn started: PID $UVICORN_PID"
+sleep 3
 
-# Wait for it to come up
-sleep 4
-
-# Health check + write status
-HEALTH_OK="no"
-HEALTH_RESP=""
+# Verify uvicorn is up locally
 if curl -sS http://localhost:8000/ > /tmp/health.json 2>&1; then
-  HEALTH_OK="yes"
-  HEALTH_RESP=$(cat /tmp/health.json)
-fi
-
-# Write a status file to a special branch (runtime-status) so external tools
-# can verify the runtime is alive via the GitHub API.
-STATUS_FILE=/tmp/runtime-status.json
-cat > "$STATUS_FILE" <<EOF
-{
-  "codespace": "${CODESPACE_NAME:-unknown}",
-  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "uvicorn_pid": $UVICORN_PID,
-  "health_ok": $HEALTH_OK,
-  "channel_secret_set": $([ -n "${PA_CHANNEL_SECRET:-}" ] && echo true || echo false),
-  "channel_secret_prefix": "${PA_CHANNEL_SECRET:0:8}",
-  "port": 8000,
-  "runtime_url": "https://${CODESPACE_NAME:-codespace}-8000.app.github.dev",
-  "health_response": $(python3 -c "import json; print(json.dumps(open('/tmp/health.json').read() if __import__('os').path.exists('/tmp/health.json') else ''))" 2>/dev/null || echo '""'),
-  "log_tail": $(python3 -c "import json,os; p='/tmp/pocketagent.log'; print(json.dumps(open(p).read()[-1000:] if os.path.exists(p) else ''))" 2>/dev/null || echo '""')
-}
-EOF
-
-# Commit the status file to a runtime-status branch (so the phone app can fetch it)
-cd /workspaces/PocketAgent
-git config user.email "pocketagent-runtime@codespace"
-git config user.name "PocketAgent Runtime"
-git checkout -B runtime-status 2>/dev/null || git checkout runtime-status 2>/dev/null
-cp "$STATUS_FILE" /workspaces/PocketAgent/RUNTIME_STATUS.json
-git add RUNTIME_STATUS.json 2>/dev/null
-git commit -m "Runtime status update ($(date -u +%H:%M:%S))" --no-verify 2>/dev/null
-git push origin runtime-status --force 2>/dev/null && echo "[PocketAgent] Status pushed to runtime-status branch" || echo "[PocketAgent] Could not push status (no token?)"
-
-# Switch back to main for normal use
-git checkout main 2>/dev/null || true
-
-# Final log
-if [ "$HEALTH_OK" = "yes" ]; then
-  echo "[PocketAgent] ✅ Runtime is healthy at https://${CODESPACE_NAME:-codespace}-8000.app.github.dev"
-  echo "  Channel secret: ${PA_CHANNEL_SECRET:0:8}..."
+  echo "[PocketAgent] ✅ Local health check passed"
 else
-  echo "[PocketAgent] ⚠️  Health check failed. Log:"
-  tail -20 /tmp/pocketagent.log 2>&1
+  echo "[PocketAgent] ⚠️  Local health check failed:"
+  tail -15 /tmp/pocketagent.log 2>&1
 fi
+
+# ---- Establish a public tunnel via serveo.net ----
+# serveo creates a random subdomain like https://abc123.serveo.net that forwards to localhost:8000
+# This is free, no account, no install — just SSH with a remote-forward flag.
+TUNNEL_LOG=/tmp/serveo.log
+echo "[PocketAgent] Establishing public tunnel via serveo.net..."
+
+# Try serveo first (most reliable free option)
+# -o StrictHostKeyChecking=no to auto-accept serveo's host key
+# -R 80:localhost:8000 = remote-forward serveo's port 80 to our port 8000
+# serveo responds with the public URL on stdout
+setsid nohup ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+  -R 80:localhost:8000 serveo.net > "$TUNNEL_LOG" 2>&1 < /dev/null &
+TUNNEL_PID=$!
+disown $TUNNEL_PID 2>/dev/null || true
+
+# Wait for serveo to print the URL
+TUNNEL_URL=""
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  sleep 2
+  TUNNEL_URL=$(grep -oE 'https://[a-z0-9]+\.serveo\.net' "$TUNNEL_LOG" 2>/dev/null | head -1)
+  if [ -n "$TUNNEL_URL" ]; then
+    break
+  fi
+done
+
+if [ -n "$TUNNEL_URL" ]; then
+  echo "[PocketAgent] ✅ Public tunnel: $TUNNEL_URL"
+  # Write the tunnel URL to a well-known file the phone app can fetch via GitHub API
+  # (via the runtime-status branch)
+  echo "{\"tunnel_url\": \"$TUNNEL_URL\", \"codespace\": \"${CODESPACE_NAME:-unknown}\", \"ts\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > /workspaces/PocketAgent/TUNNEL_URL.json
+  cd /workspaces/PocketAgent
+  git config user.email "pocketagent-runtime@codespace" 2>/dev/null
+  git config user.name "PocketAgent Runtime" 2>/dev/null
+  git checkout -B runtime-status 2>/dev/null || git checkout runtime-status 2>/dev/null
+  git add TUNNEL_URL.json 2>/dev/null
+  git commit -m "Tunnel URL update" --no-verify 2>/dev/null
+  # Use the GITHUB_TOKEN that Codespaces auto-provides
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    git push "https://x-access-token:${GITHUB_TOKEN}@github.com/UIoperationParamters29/PocketAgent.git" runtime-status --force 2>/dev/null && echo "[PocketAgent] Tunnel URL pushed to runtime-status branch"
+  else
+    git push origin runtime-status --force 2>/dev/null && echo "[PocketAgent] Tunnel URL pushed"
+  fi
+  git checkout main 2>/dev/null || true
+else
+  echo "[PocketAgent] ⚠️  Tunnel failed. Log:"
+  cat "$TUNNEL_LOG" 2>&1 | tail -10
+  echo "[PocketAgent] Falling back to codespace port forward: https://${CODESPACE_NAME:-codespace}-8000.app.github.dev"
+  echo "[PocketAgent] (This requires the codespace to be opened in a browser first.)"
+fi
+
+echo ""
+echo "=== PocketAgent runtime ready ==="
+echo "  Local: http://localhost:8000"
+echo "  Tunnel: ${TUNNEL_URL:-<none — using codespace port forward>}"
+echo "  Channel secret: ${PA_CHANNEL_SECRET:0:8}..."

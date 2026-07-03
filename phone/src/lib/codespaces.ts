@@ -135,7 +135,7 @@ export async function waitUntilAvailable(
     const status = await getCodespace(pat, name);
     opts.onPoll?.(status.state);
     if (status.state === 'Available') {
-      // Codespace port-forward URL pattern: https://<name>-<port>.app.github.dev
+      // Codespace port-forward URL pattern: https://<name>-8000.app.github.dev
       return { name, runtime_url: `https://${name}-8000.app.github.dev` };
     }
     if (status.state === 'Unavailable' || status.state === 'Archived' || status.state === 'Deleted') {
@@ -144,6 +144,39 @@ export async function waitUntilAvailable(
     await new Promise(r => setTimeout(r, intervalMs));
   }
   throw new Error(`Codespace did not become Available within ${timeoutMs / 1000}s`);
+}
+
+/**
+ * Fetch the runtime tunnel URL from the runtime-status branch.
+ * The runtime inside the codespace commits a TUNNEL_URL.json file with the
+ * public tunnel URL (from serveo.net) to the 'runtime-status' branch.
+ * This lets the phone connect WITHOUT needing the codespace to be opened in a browser.
+ *
+ * Returns null if the tunnel URL isn't available (e.g., serveo is down or
+ * postStartCommand hasn't run yet).
+ */
+export async function fetchTunnelUrl(pat: string, repo: string = 'UIoperationParamters29/PocketAgent'): Promise<string | null> {
+  try {
+    const r = await fetch(
+      `https://api.github.com/repos/${repo}/contents/TUNNEL_URL.json?ref=runtime-status`,
+      {
+        headers: {
+          Authorization: `Bearer ${pat}`,
+          Accept: 'application/vnd.github+json',
+        },
+      }
+    );
+    if (!r.ok) return null;
+    const data = await r.json();
+    if (data.encoding === 'base64' && data.content) {
+      const content = atob(data.content.replace(/\n/g, ''));
+      const parsed = JSON.parse(content);
+      return parsed.tunnel_url || null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // ---------- Verify PAT scopes ----------
