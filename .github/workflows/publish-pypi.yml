@@ -1,0 +1,36 @@
+name: Publish runtime to PyPI
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    name: Build + publish to PyPI
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # for trusted publishing
+    defaults:
+      run:
+        working-directory: runtime-pkg
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build package
+        run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Uses Trusted Publishing (no API token needed if configured on PyPI)
+          # Fallback to API token if set as a secret
+          password: ${{ secrets.PYPI_API_TOKEN }}
