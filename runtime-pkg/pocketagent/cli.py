@@ -34,6 +34,7 @@ def _is_running() -> bool:
 
 def start():
     """Start the PocketAgent runtime server in the background."""
+    global PORT
     _ensure_dirs()
     if _is_running():
         print(f"✅ PocketAgent is already running on port {PORT}")
@@ -46,6 +47,20 @@ def start():
         print("✅ Acquired Termux wake-lock")
     except (FileNotFoundError, subprocess.TimeoutExpired):
         print("⚠️  termux-wake-lock not available (install Termux:API app if you want background survival)")
+
+    # Check if port is already in use — if so, try 8081, 8082, etc.
+    import socket
+    for try_port in range(8080, 8090):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", try_port))
+                PORT = try_port
+                break
+            except OSError:
+                continue
+    else:
+        print("❌ Ports 8080-8089 all in use. Free one and retry.")
+        return
 
     # Start uvicorn in the background
     print(f"🚀 Starting PocketAgent runtime on port {PORT}...")

@@ -65,8 +65,14 @@ export function ChatScreen() {
     checkRuntime();
   }, [checkRuntime]);
 
-  // Connect to the runtime
+  // Connect to the runtime (re-check first)
   const connect = useCallback(async () => {
+    // Re-check runtime is up before connecting
+    const ok = await checkRuntime();
+    if (!ok) {
+      Alert.alert('Runtime not running', 'Start it in Termux first: pocketagent-start');
+      return;
+    }
     const cfg = await loadSessionConfig();
     if (!cfg) {
       Alert.alert('No LLM config', 'Complete onboarding first to set your LLM provider + key.');
@@ -74,7 +80,7 @@ export function ChatScreen() {
     }
     store.setCodespace('Available', 'termux', RUNTIME_URL);
     await session.connect();
-  }, [session, store]);
+  }, [session, store, checkRuntime]);
 
   const onSend = useCallback((text: string) => {
     session.sendMessage(text);

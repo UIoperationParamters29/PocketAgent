@@ -102,7 +102,9 @@ async def _tool_bash(args: dict) -> dict:
     def _run():
         try:
             proc = subprocess.run(cmd, shell=True, cwd=WORKSPACE, capture_output=True, text=True, timeout=timeout)
-            out = (proc.stdout or "") + (proc.stderr and "\n[stderr]\n" + proc.stderr or "")
+            out = (proc.stdout or "")
+            if proc.stderr:
+                out += "\n[stderr]\n" + proc.stderr
             if len(out) > 30000: out = out[:30000] + f"\n...[truncated, {len(out)} total]"
             return {"ok": proc.returncode == 0, "output": out, "error": "" if proc.returncode == 0 else f"exit {proc.returncode}"}
         except subprocess.TimeoutExpired:
@@ -324,10 +326,13 @@ async def run_agent_loop(session: Session, user_message: str) -> AsyncIterator[d
         tool_calls: list[dict] = []
 
         try:
-            async with httpx.AsyncClient(timeout=300) as c:
+            # Use a long read timeout for streaming (LLM can take a while to start);
+            # connect timeout is short so we fail fast if the endpoint is down.
+            timeout = httpx.Timeout(connect=15, read=600, write=30, pool=30)
+            async with httpx.AsyncClient(timeout=timeout) as c:
                 async with c.stream("POST", f"{session.base_url}/chat/completions",
                         headers={"Authorization": f"Bearer {session.api_key}", "Content-Type": "application/json"},
-                        json={"model": session.model, "messages": session.messages, "tools": tools, "stream": True, "max_tokens": 8000}) as r:
+                        json={"model": session.model, "messages": session.messages, "tools": tools, "stream": True, "max_tokens": 16000}) as r:
                     if r.status_code != 200:
                         body = await r.aread()
                         yield _evt("error", message=f"LLM error {r.status_code}: {body.decode()[:300]}", kind="llm")
@@ -453,12 +458,15 @@ async def agent_ws(ws: WebSocket):
                     try: await current_task
                     except asyncio.CancelledError: pass
 
-                async def _run_turn():
+                # Capture content in a local variable to avoid closure-over-loop-variable bug
+                _content = content
+                async def _run_turn(_msg=_content):
                     try:
-                        async for evt in run_agent_loop(session, content):
+                        async for evt in run_agent_loop(session, _msg):
                             await ws.send_json(evt)
                     except asyncio.CancelledError:
                         await ws.send_json({"type": "session.end", "reason": "cancelled", "iterations": session.iterations})
+                        raise
                     except Exception as e:
                         await ws.send_json({"type": "error", "message": f"{type(e).__name__}: {e}", "kind": "server"})
 

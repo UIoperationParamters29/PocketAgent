@@ -1,0 +1,44 @@
+[
+  {
+    "id": "1",
+    "content": "Explore repo structure",
+    "status": "in_progress",
+    "priority": "high"
+  },
+  {
+    "id": "2",
+    "content": "Review runtime server.py for bugs/security",
+    "status": "pending",
+    "priority": "high"
+  },
+  {
+    "id": "3",
+    "content": "Review phone app screens/components/lib/store",
+    "status": "pending",
+    "priority": "high"
+  },
+  {
+    "id": "4",
+    "content": "Fix bugs found",
+    "status": "pending",
+    "priority": "high"
+  },
+  {
+    "id": "5",
+    "content": "Improve UI/UX to match z.ai agentic feel",
+    "status": "pending",
+    "priority": "medium"
+  },
+  {
+    "id": "6",
+    "content": "Run tests to verify",
+    "status": "pending",
+    "priority": "high"
+  },
+  {
+    "id": "7",
+    "content": "Summarize changes",
+    "status": "pending",
+    "priority": "low"
+  }
+]
