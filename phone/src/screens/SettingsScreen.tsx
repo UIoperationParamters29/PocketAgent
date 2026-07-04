@@ -1,6 +1,6 @@
 /**
- * SettingsScreen — edit BYOK config, codespace, see session info, wipe.
- * Now with: Test connection + Fetch models buttons.
+ * SettingsScreen — v0.5: simplified. Just BYOK config + wipe.
+ * No more codespace/PAT/channel secret — runtime runs in Termux.
  */
 
 import React, { useEffect, useState } from 'react';
@@ -9,8 +9,7 @@ import {
 } from 'react-native';
 import { colors, spacing, radius, typography } from '../theme/colors';
 import {
-  loadSessionConfig, saveSessionConfig, loadChannelSecret, saveChannelSecret,
-  loadCodespaceName, saveCodespaceName, loadGithubPat, saveGithubPat, wipeAll,
+  loadSessionConfig, saveSessionConfig, wipeAll,
   PROVIDER_PRESETS, ProviderPreset,
 } from '../lib/secure-store';
 import { SessionConfig } from '../lib/types';
@@ -21,13 +20,8 @@ import { fetchModels, verifyLlmConfig, ModelInfo } from '../lib/llm';
 export function SettingsScreen({ onWiped }: { onWiped: () => void }) {
   const session = useAgentSession();
   const store = useStore();
-  const [pat, setPat] = useState('');
-  const [channelSecret, setChannelSecret] = useState('');
-  const [codespaceName, setCodespaceName] = useState('');
   const [cfg, setCfg] = useState<SessionConfig | null>(null);
   const [saving, setSaving] = useState(false);
-
-  // Model fetch + LLM test (mirrors OnboardingScreen)
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [showModelPicker, setShowModelPicker] = useState(false);
@@ -35,44 +29,28 @@ export function SettingsScreen({ onWiped }: { onWiped: () => void }) {
   const [llmTestResult, setLlmTestResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   useEffect(() => {
-    (async () => {
-      setPat((await loadGithubPat()) || '');
-      setChannelSecret((await loadChannelSecret()) || '');
-      setCodespaceName((await loadCodespaceName()) || '');
-      setCfg(await loadSessionConfig());
-    })();
+    (async () => { setCfg(await loadSessionConfig()); })();
   }, []);
 
   const saveAll = async () => {
     setSaving(true);
     try {
-      await saveGithubPat(pat.trim());
-      await saveChannelSecret(channelSecret);
-      await saveCodespaceName(codespaceName.trim());
       if (cfg) await saveSessionConfig(cfg);
       Alert.alert('Saved', 'Settings updated. Reconnect to apply.');
-    } catch (e: any) {
-      Alert.alert('Save failed', e.message);
-    } finally {
-      setSaving(false);
-    }
+    } catch (e: any) { Alert.alert('Save failed', e.message); }
+    finally { setSaving(false); }
   };
 
   const wipe = () => {
-    Alert.alert('Wipe everything?', 'This removes all keys, secrets, and codespace name from this device.', [
+    Alert.alert('Wipe all data?', 'Removes all keys + config from this device.', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Wipe', style: 'destructive', onPress: async () => {
-        await wipeAll();
-        onWiped();
-      }},
+      { text: 'Wipe', style: 'destructive', onPress: async () => { await wipeAll(); onWiped(); }},
     ]);
   };
 
   const pickPreset = (p: ProviderPreset) => {
     if (!cfg) return;
-    if (p.id === 'custom') {
-      setCfg({ ...cfg });
-    } else {
+    if (p.id !== 'custom') {
       setCfg({ ...cfg, base_url: p.base_url, model: p.default_model });
     }
   };
@@ -81,42 +59,6 @@ export function SettingsScreen({ onWiped }: { onWiped: () => void }) {
     <ScrollView style={styles.container} contentContainerStyle={styles.scroll}>
       <Text style={styles.title}>Settings</Text>
 
-      {/* Codespace */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Codespace</Text>
-        <Text style={styles.label}>GitHub PAT</Text>
-        <TextInput
-          style={styles.input}
-          value={pat}
-          onChangeText={setPat}
-          placeholder="ghp_..."
-          placeholderTextColor={colors.textTertiary}
-          autoCapitalize="none"
-          autoCorrect={false}
-          secureTextEntry
-        />
-        <Text style={styles.label}>Codespace name</Text>
-        <TextInput
-          style={styles.input}
-          value={codespaceName}
-          onChangeText={setCodespaceName}
-          placeholder="auto-detect on Wake"
-          placeholderTextColor={colors.textTertiary}
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
-        <Text style={styles.label}>Channel secret (PA_CHANNEL_SECRET)</Text>
-        <TextInput
-          style={styles.input}
-          value={channelSecret}
-          onChangeText={setChannelSecret}
-          placeholder="32-char hex"
-          placeholderTextColor={colors.textTertiary}
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
-      </View>
-
       {/* LLM */}
       {cfg && (
         <View style={styles.section}>
@@ -124,130 +66,79 @@ export function SettingsScreen({ onWiped }: { onWiped: () => void }) {
           <Text style={styles.label}>Provider</Text>
           <View style={styles.presetGrid}>
             {PROVIDER_PRESETS.map(p => (
-              <TouchableOpacity
-                key={p.id}
-                style={[styles.presetChip, cfg.base_url === p.base_url && styles.presetChipActive]}
-                onPress={() => pickPreset(p)}
-              >
+              <TouchableOpacity key={p.id} style={[styles.presetChip, cfg.base_url === p.base_url && styles.presetChipActive]} onPress={() => pickPreset(p)}>
                 <Text style={[styles.presetChipText, cfg.base_url === p.base_url && styles.presetChipTextActive]}>{p.label}</Text>
               </TouchableOpacity>
             ))}
           </View>
           <Text style={styles.label}>API key</Text>
-          <TextInput
-            style={styles.input}
-            value={cfg.api_key}
-            onChangeText={(v) => setCfg({ ...cfg, api_key: v })}
-            placeholder="sk-..."
-            placeholderTextColor={colors.textTertiary}
-            autoCapitalize="none"
-            autoCorrect={false}
-            secureTextEntry
-          />
+          <TextInput style={styles.input} value={cfg.api_key} onChangeText={(v) => { setCfg({ ...cfg, api_key: v }); setLlmTestResult(null); setModels([]); }} placeholder="sk-..." placeholderTextColor={colors.textTertiary} autoCapitalize="none" autoCorrect={false} secureTextEntry />
           <Text style={styles.label}>Model</Text>
-          <TextInput
-            style={styles.input}
-            value={cfg.model}
-            onChangeText={(v) => setCfg({ ...cfg, model: v })}
-            placeholder="gpt-4o-mini"
-            placeholderTextColor={colors.textTertiary}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
+          <TextInput style={styles.input} value={cfg.model} onChangeText={(v) => { setCfg({ ...cfg, model: v }); setLlmTestResult(null); }} placeholder="gpt-4o-mini" placeholderTextColor={colors.textTertiary} autoCapitalize="none" autoCorrect={false} />
           <Text style={styles.label}>Base URL</Text>
-          <TextInput
-            style={styles.input}
-            value={cfg.base_url}
-            onChangeText={(v) => { setCfg({ ...cfg, base_url: v }); setLlmTestResult(null); setModels([]); }}
-            placeholder="https://api.openai.com/v1"
-            placeholderTextColor={colors.textTertiary}
-            autoCapitalize="none"
-            autoCorrect={false}
-          />
+          <TextInput style={styles.input} value={cfg.base_url} onChangeText={(v) => { setCfg({ ...cfg, base_url: v }); setLlmTestResult(null); setModels([]); }} placeholder="https://api.openai.com/v1" placeholderTextColor={colors.textTertiary} autoCapitalize="none" autoCorrect={false} />
 
-          {/* Fetch models + Test connection */}
+          {/* Fetch models + Test */}
           <View style={styles.buttonRow}>
-            <TouchableOpacity
-              style={[styles.auxBtn, (!cfg.base_url || !cfg.api_key || fetchingModels) && styles.auxBtnDisabled]}
+            <TouchableOpacity style={[styles.auxBtn, (!cfg.base_url || !cfg.api_key || fetchingModels) && styles.auxBtnDisabled]}
               onPress={async () => {
                 setFetchingModels(true);
-                try {
-                  const list = await fetchModels(cfg.base_url, cfg.api_key);
-                  setModels(list);
-                  if (list.length > 0) setShowModelPicker(true);
-                  else Alert.alert('No models', 'Provider returned 0 models.');
-                } catch (e: any) { Alert.alert('Fetch failed', e.message); }
-                finally { setFetchingModels(false); }
-              }}
-              disabled={!cfg.base_url || !cfg.api_key || fetchingModels}
-            >
+                try { const list = await fetchModels(cfg.base_url, cfg.api_key); setModels(list); if (list.length > 0) setShowModelPicker(true); else Alert.alert('No models', 'Provider returned 0.'); }
+                catch (e: any) { Alert.alert('Fetch failed', e.message); } finally { setFetchingModels(false); }
+              }} disabled={!cfg.base_url || !cfg.api_key || fetchingModels}>
               {fetchingModels ? <ActivityIndicator color={colors.accent} size="small" /> : <Text style={styles.auxBtnText}>Fetch models</Text>}
             </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.auxBtn, (!cfg.base_url || !cfg.api_key || !cfg.model || testingLlm) && styles.auxBtnDisabled]}
+            <TouchableOpacity style={[styles.auxBtn, (!cfg.base_url || !cfg.api_key || !cfg.model || testingLlm) && styles.auxBtnDisabled]}
               onPress={async () => {
                 setTestingLlm(true); setLlmTestResult(null);
                 const r = await verifyLlmConfig(cfg.base_url, cfg.api_key, cfg.model);
                 setLlmTestResult(r.ok ? { ok: true, message: `✓ OK — reply: ${r.reply?.slice(0, 50) || '(empty)'}` } : { ok: false, message: `✗ ${r.error}` });
                 setTestingLlm(false);
-              }}
-              disabled={!cfg.base_url || !cfg.api_key || !cfg.model || testingLlm}
-            >
+              }} disabled={!cfg.base_url || !cfg.api_key || !cfg.model || testingLlm}>
               {testingLlm ? <ActivityIndicator color={colors.accent} size="small" /> : <Text style={styles.auxBtnText}>Test</Text>}
             </TouchableOpacity>
           </View>
-          {llmTestResult && (
-            <Text style={[styles.testResult, llmTestResult.ok ? styles.testOk : styles.testFail]}>
-              {llmTestResult.message}
-            </Text>
-          )}
+          {llmTestResult && <Text style={[styles.testResult, llmTestResult.ok ? styles.testOk : styles.testFail]}>{llmTestResult.message}</Text>}
         </View>
       )}
-
-      {/* Model picker modal */}
-      <Modal visible={showModelPicker} animationType="slide" transparent={true} onRequestClose={() => setShowModelPicker(false)}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Pick a model ({models.length})</Text>
-            <FlatList
-              data={models}
-              keyExtractor={(m) => m.id}
-              renderItem={({ item }) => (
-                <TouchableOpacity
-                  style={[styles.modelItem, cfg?.model === item.id && styles.modelItemSelected]}
-                  onPress={() => { setCfg({ ...(cfg as SessionConfig), model: item.id }); setShowModelPicker(false); setLlmTestResult(null); }}
-                >
-                  <Text style={styles.modelItemId}>{item.id}</Text>
-                  {item.label && item.label !== item.id ? <Text style={styles.modelItemLabel}>{item.label}</Text> : null}
-                </TouchableOpacity>
-              )}
-              style={{ maxHeight: 400 }}
-            />
-            <TouchableOpacity style={styles.modalClose} onPress={() => setShowModelPicker(false)}>
-              <Text style={styles.modalCloseText}>Close</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
 
       {/* Session info */}
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Session</Text>
         <Text style={styles.kv}>session_id: <Text style={styles.kvVal}>{store.sessionId || '—'}</Text></Text>
         <Text style={styles.kv}>connection: <Text style={styles.kvVal}>{store.connStatus}</Text></Text>
-        <Text style={styles.kv}>codespace: <Text style={styles.kvVal}>{store.codespaceName || '—'}</Text></Text>
-        <Text style={styles.kv}>runtime_url: <Text style={styles.kvVal}>{store.runtimeUrl || '—'}</Text></Text>
+        <Text style={styles.kv}>runtime_url: <Text style={styles.kvVal}>{store.runtimeUrl || 'localhost:8080'}</Text></Text>
         {store.lastError ? <Text style={styles.kvError}>last_error: {store.lastError}</Text> : null}
       </View>
 
       <View style={styles.actions}>
-        <TouchableOpacity style={styles.saveBtn} onPress={saveAll} disabled={saving} activeOpacity={0.7}>
+        <TouchableOpacity style={styles.saveBtn} onPress={saveAll} disabled={saving}>
           {saving ? <ActivityIndicator color="#fff" /> : <Text style={styles.saveBtnText}>Save</Text>}
         </TouchableOpacity>
-        <TouchableOpacity style={styles.wipeBtn} onPress={wipe} activeOpacity={0.7}>
+        <TouchableOpacity style={styles.wipeBtn} onPress={wipe}>
           <Text style={styles.wipeBtnText}>Wipe all data</Text>
         </TouchableOpacity>
       </View>
+
+      {/* Model picker */}
+      <Modal visible={showModelPicker} animationType="slide" transparent={true} onRequestClose={() => setShowModelPicker(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Pick a model ({models.length})</Text>
+            <FlatList data={models} keyExtractor={(m) => m.id}
+              renderItem={({ item }) => (
+                <TouchableOpacity style={[styles.modelItem, cfg?.model === item.id && styles.modelItemSelected]}
+                  onPress={() => { setCfg({ ...(cfg as SessionConfig), model: item.id }); setShowModelPicker(false); setLlmTestResult(null); }}>
+                  <Text style={styles.modelItemId}>{item.id}</Text>
+                  {item.label && item.label !== item.id ? <Text style={styles.modelItemLabel}>{item.label}</Text> : null}
+                </TouchableOpacity>
+              )} style={{ maxHeight: 400 }} />
+            <TouchableOpacity style={styles.modalClose} onPress={() => setShowModelPicker(false)}>
+              <Text style={styles.modalCloseText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 }

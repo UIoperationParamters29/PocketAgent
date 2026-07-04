@@ -187,9 +187,12 @@ export function useAgentSession() {
 
   const sendMessage = useCallback((content: string) => {
     if (!wsRef.current) return false;
-    // Optimistic local add
-    addUserMessage(content);
-    return wsRef.current.send({ type: 'user.message', content });
+    // Try to send first — only optimistic-add if it actually went through
+    const sent = wsRef.current.send({ type: 'user.message', content });
+    if (sent) {
+      addUserMessage(content);
+    }
+    return sent;
   }, [addUserMessage]);
 
   const answerQuestion = useCallback((questionId: string, answer: UserAnswer[]) => {

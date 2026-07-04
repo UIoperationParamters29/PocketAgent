@@ -492,7 +492,7 @@ export function StatusBar({
   codespaceState?: string | null;
 }) {
   const { color, label, pulse } = (() => {
-    if (status === 'waking-codespace') return { color: colors.warning, label: `Waking codespace… ${codespaceState || ''}`.trim(), pulse: true };
+    if (status === 'waking-codespace') return { color: colors.warning, label: `Starting runtime…`.trim(), pulse: true };
     if (status === 'connected') return { color: colors.success, label: 'Connected', pulse: false };
     if (status === 'connecting' || status === 'handshaking') return { color: colors.warning, label: 'Connecting…', pulse: true };
     if (status === 'reconnecting') return { color: colors.warning, label: 'Reconnecting…', pulse: true };

@@ -93,7 +93,7 @@ export class AgentWS {
     };
 
     this.ws.onerror = (e: any) => {
-      this.lastError = 'WebSocket connection error — the runtime may not be running inside the codespace. Open the codespace at github.com/codespaces, check the terminal for uvicorn errors.';
+      this.lastError = 'Could not reach the PocketAgent runtime. Make sure Termux is open and running: pocketagent-start';
       this.setStatus('error');
     };
 
