@@ -2,43 +2,85 @@
   {
     "id": "1",
     "content": "Explore repo structure",
-    "status": "in_progress",
+    "status": "completed",
     "priority": "high"
   },
   {
     "id": "2",
-    "content": "Review runtime server.py for bugs/security",
-    "status": "pending",
+    "content": "Review runtime server.py",
+    "status": "completed",
     "priority": "high"
   },
   {
     "id": "3",
-    "content": "Review phone app screens/components/lib/store",
-    "status": "pending",
+    "content": "Review phone screens",
+    "status": "completed",
     "priority": "high"
   },
   {
     "id": "4",
-    "content": "Fix bugs found",
-    "status": "pending",
+    "content": "Review components, lib, store, theme, App.tsx",
+    "status": "completed",
     "priority": "high"
   },
   {
     "id": "5",
-    "content": "Improve UI/UX to match z.ai agentic feel",
-    "status": "pending",
-    "priority": "medium"
+    "content": "Find bugs + UX issues",
+    "status": "completed",
+    "priority": "high"
   },
   {
-    "id": "6",
-    "content": "Run tests to verify",
+    "id": "6a",
+    "content": "Fix server: iterations reset per turn",
+    "status": "in_progress",
+    "priority": "high"
+  },
+  {
+    "id": "6b",
+    "content": "Fix server: handle user.answer frame",
     "status": "pending",
     "priority": "high"
   },
   {
+    "id": "6c",
+    "content": "Fix agent-ws: Termux copy (not codespace)",
+    "status": "pending",
+    "priority": "high"
+  },
+  {
+    "id": "6d",
+    "content": "Fix FilesScreen stale copy + pull-to-refresh + hscroll",
+    "status": "pending",
+    "priority": "medium"
+  },
+  {
+    "id": "6e",
+    "content": "Fix useAgentSession sendMessage guard",
+    "status": "pending",
+    "priority": "high"
+  },
+  {
+    "id": "6f",
+    "content": "Add Stop/cancel button in ChatScreen",
+    "status": "pending",
+    "priority": "medium"
+  },
+  {
+    "id": "6g",
+    "content": "Polish StatusBar + misc UI",
+    "status": "pending",
+    "priority": "medium"
+  },
+  {
     "id": "7",
+    "content": "Run tests (tsc + jest)",
+    "status": "pending",
+    "priority": "high"
+  },
+  {
+    "id": "8",
     "content": "Summarize changes",
     "status": "pending",
-    "priority": "low"
+    "priority": "medium"
   }
 ]

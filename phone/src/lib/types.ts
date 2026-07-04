@@ -13,6 +13,7 @@ export type OutgoingFrame =
   | { type: 'user.message'; content: string }
   | { type: 'user.answer'; question_id: string; answer: UserAnswer[] }
   | { type: 'session.reset' }
+  | { type: 'session.cancel' }
   | { type: 'ping' };
 
 export interface SessionConfig {

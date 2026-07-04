@@ -75,7 +75,7 @@ export function FilesScreen() {
   if (!runtimeUrl) {
     return (
       <View style={styles.empty}>
-        <Text style={styles.emptyText}>Wake the codespace first.</Text>
+        <Text style={styles.emptyText}>Start the runtime in Termux first.</Text>
       </View>
     );
   }

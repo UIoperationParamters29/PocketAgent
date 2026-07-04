@@ -312,6 +312,7 @@ async def run_agent_loop(session: Session, user_message: str) -> AsyncIterator[d
     """Run one full agent turn. Yields events."""
     def _evt(t, **kw): return {"type": t, "ts": time.time(), **kw}
 
+    turn_started = time.time()
     yield _evt("user.message", content=user_message)
     session.messages.append({"role": "user", "content": user_message})
 
@@ -320,7 +321,11 @@ async def run_agent_loop(session: Session, user_message: str) -> AsyncIterator[d
 
     tools = to_openai_tools()
 
-    while session.iterations < session.max_iterations:
+    # Iterations are counted PER TURN (per user message), not for the lifetime of
+    # the session — otherwise the agent silently stops after ~25 total tool loops.
+    turn_iterations = 0
+    while turn_iterations < session.max_iterations:
+        turn_iterations += 1
         session.iterations += 1
         assistant_text = ""
         tool_calls: list[dict] = []
@@ -372,7 +377,8 @@ async def run_agent_loop(session: Session, user_message: str) -> AsyncIterator[d
             yield _evt("assistant.message", content=assistant_text)
 
         if not tool_calls:
-            yield _evt("session.end", reason="complete", iterations=session.iterations)
+            yield _evt("session.end", reason="complete", iterations=turn_iterations,
+                       total_ms=int((time.time() - turn_started) * 1000))
             return
 
         # Execute tools
@@ -402,8 +408,9 @@ async def run_agent_loop(session: Session, user_message: str) -> AsyncIterator[d
 
             session.messages.append({"role": "tool", "tool_call_id": call_id, "content": (result["error"] + "\n" + result["output"]) if result["error"] else result["output"]})
 
-    yield _evt("warning", message=f"max_iterations={session.max_iterations} reached")
-    yield _evt("session.end", reason="max_iterations", iterations=session.iterations)
+    yield _evt("warning", message=f"max_iterations={session.max_iterations} reached for this turn")
+    yield _evt("session.end", reason="max_iterations", iterations=turn_iterations,
+               total_ms=int((time.time() - turn_started) * 1000))
 
 
 # --------------------------------------------------------------------------- #
@@ -471,6 +478,50 @@ async def agent_ws(ws: WebSocket):
                         await ws.send_json({"type": "error", "message": f"{type(e).__name__}: {e}", "kind": "server"})
 
                 current_task = asyncio.create_task(_run_turn())
+
+            elif mtype == "user.answer":
+                # The phone answered an AskUserQuestion. Feed the answers back to the
+                # agent as a synthetic user turn so it can continue reasoning.
+                answers = msg.get("answer", []) or []
+                if not isinstance(answers, list):
+                    answers = [answers]
+                lines = []
+                for a in answers:
+                    if isinstance(a, dict):
+                        header = a.get("header", "")
+                        ans = a.get("answer", "")
+                        if isinstance(ans, list):
+                            ans = ", ".join(str(x) for x in ans)
+                        lines.append(f"{header}: {ans}" if header else str(ans))
+                    else:
+                        lines.append(str(a))
+                answer_text = "\n".join(lines).strip() or "(no answer provided)"
+
+                if current_task and not current_task.done():
+                    current_task.cancel()
+                    try: await current_task
+                    except asyncio.CancelledError: pass
+
+                _answer = answer_text
+                async def _run_answer(_msg=_answer):
+                    try:
+                        async for evt in run_agent_loop(session, _msg):
+                            await ws.send_json(evt)
+                    except asyncio.CancelledError:
+                        await ws.send_json({"type": "session.end", "reason": "cancelled", "iterations": session.iterations})
+                        raise
+                    except Exception as e:
+                        await ws.send_json({"type": "error", "message": f"{type(e).__name__}: {e}", "kind": "server"})
+
+                current_task = asyncio.create_task(_run_answer())
+
+            elif mtype == "session.cancel":
+                # Explicit stop request from the phone (Stop button).
+                if current_task and not current_task.done():
+                    current_task.cancel()
+                    try: await current_task
+                    except asyncio.CancelledError: pass
+                await ws.send_json({"type": "session.end", "reason": "cancelled", "iterations": session.iterations})
 
             elif mtype == "ping":
                 await ws.send_json({"type": "pong", "ts": time.time()})

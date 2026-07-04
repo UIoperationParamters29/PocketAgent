@@ -1,20 +1,20 @@
-"""Summon Claude Fable 5 as a master reviewer/improver for PocketAgent.
+"""Summon Claude Opus 4.8 as master reviewer/improver for PocketAgent.
 
 Gives it:
   - Full project context (architecture, goals, what we've tried)
   - All 8 tools (Bash, Read, Write, Edit, Glob, Grep, LS, TodoWrite)
   - The PocketAgent repo as its workspace
-  - A mandate: review everything, find issues, improve UX, ship it
+  - A mandate: polish UI/UX, fix bugs, improve functionality
 
-We just monitor + stream what it does.
+We just monitor + stream what it does, then verify + ship.
 """
 import httpx, json, subprocess, os, sys, time
 from pathlib import Path
 from typing import Any
 
 BASE_URL = "https://api.gateway.orgn.com/v1"
-API_KEY = "sk-ollm-OuU9Sn4QGcu2-lXgVwFRyDERbTAkme4QpFy7mDMA2F2cGXzeiNGKFpaDOubDk"
-MODEL = "vercel_claude_fable_5"
+API_KEY = "sk-ollm-FO2QJqW6ioPI-wBAiuesqgHD0jDjh4eBttpvxoZemGeltpcozkaLcCrk89Hqu"
+MODEL = "vercel_claude_opus_4_8"  # less costly than Fable 5
 WORKSPACE = Path("/home/z/my-project/pocketagent")
 
 TOOLS = [
@@ -37,7 +37,8 @@ def exec_tool(name, args):
     try:
         if name == "Bash":
             r = subprocess.run(args["command"], shell=True, cwd=WORKSPACE, capture_output=True, text=True, timeout=int(args.get("timeout",120)))
-            out = (r.stdout or "") + (r.stderr and "\n[stderr]\n"+r.stderr or "")
+            out = (r.stdout or "")
+            if r.stderr: out += "\n[stderr]\n" + r.stderr
             return out[:8000] or "(no output)"
         if name == "Read":
             p = resolve(args["file_path"])
@@ -89,10 +90,10 @@ def exec_tool(name, args):
 def stream_llm(messages):
     content = ""
     tool_calls = []
-    with httpx.Client(timeout=300) as c:
+    with httpx.Client(timeout=400) as c:
         with c.stream("POST", f"{BASE_URL}/chat/completions",
                       headers={"Authorization":f"Bearer {API_KEY}","Content-Type":"application/json"},
-                      json={"model":MODEL,"messages":messages,"tools":TOOLS,"stream":True,"max_tokens":8000}) as r:
+                      json={"model":MODEL,"messages":messages,"tools":TOOLS,"stream":True,"max_tokens":16000}) as r:
             if r.status_code != 200:
                 print(f"\n[LLM ERROR {r.status_code}] {r.read().decode()[:500]}")
                 return content, tool_calls
@@ -117,19 +118,19 @@ def stream_llm(messages):
                 except: pass
     return content, tool_calls
 
-def run(user_message, max_iters=30):
+def run(user_message, max_iters=40):
     print(f"\n{'='*70}")
-    print(f"🧠 CLAUDE FABLE 5 — MASTER REVIEWER/IMPROVER")
+    print(f"🧠 CLAUDE OPUS 4.8 — MASTER REVIEWER/IMPROVER")
     print(f"📂 Workspace: {WORKSPACE}")
     print(f"{'='*70}\n")
 
     messages = [
-        {"role":"system","content":f"""You are Claude Fable 5, summoned as a master code reviewer + improver for PocketAgent.
+        {"role":"system","content":f"""You are Claude Opus 4.8, summoned as a master code reviewer + UI/UX improver for PocketAgent.
 
 # What PocketAgent is
-A phone app that replicates z.ai agentic mode on the user's phone, using their own LLM API keys. The agent has its own Linux computer (Termux) on the phone, with full tool access (Bash, Read, Write, Edit, Glob, Grep, LS, TodoWrite, Skill).
+A phone app that replicates z.ai agentic mode on the user's phone, using their own LLM API keys. The agent has its own Linux computer (Termux) on the phone, with full tool access.
 
-# Architecture (v0.5.0 — just shipped)
+# Architecture (v0.5.1 — just shipped)
 - APK (thin UI, React Native + Expo) ←ws://127.0.0.1:8080→ Termux runtime (FastAPI + WebSocket)
 - The runtime runs inside Termux on the phone. No cloud. No CC. No egress issues.
 - LLM key never leaves phone. Workspace at ~/pocketagent-workspace/
@@ -137,24 +138,38 @@ A phone app that replicates z.ai agentic mode on the user's phone, using their o
 
 # Your workspace IS the PocketAgent repo
 {WORKSPACE}
-You have FULL access. Read any file, edit any file, run any command. Treat it as your own.
+You have FULL access. Read any file, edit any file, run any command.
 
 # Your mission
-1. Explore the codebase — read the key files (runtime-pkg/pocketagent/server.py, phone/src/screens/*, phone/src/components/index.tsx, phone/src/lib/*, phone/src/state/store.ts)
-2. Find bugs, security issues, UX problems, anything that could break
-3. IMPROVE the UI/UX — you know z.ai agentic mode's feel. Match it. Make it beautiful, smooth, modern.
-4. Fix what you find — use Write/Edit to actually patch files
-5. Run tests to verify (npm test in phone/, python tests in cloud/runtime/)
-6. When done, summarize what you changed + why
+The user wants z.ai agentic mode on their phone. The core works, but they want POLISH:
+1. Review the codebase thoroughly — read the key files
+2. Find bugs, UX issues, anything that could break or feel janky
+3. FIX what you find — use Write/Edit to actually patch files. Don't just comment.
+4. Polish the UI/UX to match z.ai agentic mode's feel:
+   - Clean dark theme (already there: #0E0E10 bg, #10A37F accent)
+   - Smooth animations
+   - Streaming chat with tool-call cards
+   - File viewer
+   - Onboarding flow
+5. Run tests to verify (cd phone && npx tsc --noEmit && npx jest)
+6. When done, summarize what you changed
+
+# z.ai agentic mode reference (the gold standard)
+- Top bar: brand + connection status
+- Chat: streaming tokens, tool-call cards (collapsible), todo list, file results
+- Input: bottom bar, send button, disabled when agent busy
+- Files tab: tree + file viewer with syntax highlighting
+- Settings: BYOK config, model fetch, test connection
+- Dark theme, monospace for code, accent color for highlights
 
 # Tools you have
-- Bash: run any command (tests, git, npm, python, anything)
-- Read/Write/Edit: file operations
+- Bash: run any command (tests, git, npm, python)
+- Read/Write/Edit: file operations (USE THESE to fix things)
 - Glob/Grep: find files / search content
 - LS: list dirs
 - TodoWrite: track your review tasks
 
-Be autonomous. Take initiative. Don't ask permission — just improve things. The user is watching + trusts you. You're the master."""},
+Be autonomous. Take initiative. Don't ask permission — just improve things. The user trusts you. You're the master. ACTUALLY MAKE CHANGES with Write/Edit, don't just review."""},
         {"role":"user","content":user_message},
     ]
 
@@ -191,5 +206,15 @@ Be autonomous. Take initiative. Don't ask permission — just improve things. Th
     print("\n⚠️ Max iterations reached")
 
 if __name__ == "__main__":
-    prompt = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else """Review the entire PocketAgent codebase. The repo is your workspace. Read the key files, find bugs + UX issues + anything that could break, and FIX them with Write/Edit. Match z.ai agentic mode's feel — clean, dark, modern, smooth. Run tests to verify. Take your time, be thorough. Start by making a todo list, then read the key files."""
+    prompt = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else """Review the entire PocketAgent codebase and POLISH it. The repo is your workspace.
+
+Start by:
+1. Make a todo list of what you want to review/improve
+2. Read the key files: runtime-pkg/pocketagent/server.py, phone/src/screens/*, phone/src/components/index.tsx, phone/src/lib/*, phone/src/state/store.ts, phone/src/theme/colors.ts, phone/App.tsx
+3. Find bugs + UX issues + anything that doesn't match z.ai agentic mode's feel
+4. FIX them with Write/Edit — actually patch the files
+5. Run tests: cd phone && npx tsc --noEmit && npx jest
+6. Summarize what you changed
+
+The user wants this to feel like z.ai agentic mode — clean, dark, smooth, modern. Make it beautiful. Take your time. Be thorough."""
     run(prompt)
